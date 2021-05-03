@@ -1,4 +1,4 @@
-from db import db_engine
+from db_utils.conn import db_engine
 from model import CovidModel, CovidModelFit
 import pandas as pd
 import datetime as dt
@@ -8,27 +8,6 @@ from time import perf_counter
 import urllib.request as request
 import json as json
 import argparse
-
-
-# def models_from_external_params(fname, url=None):
-#     if url is not None:
-#         r = request.urlopen(url).read().decode('utf8')
-#         f = open(fname, 'w')
-#         f.write(r)
-#
-#     ex_params_df = pd.read_csv(fname)
-#     ef_tcols = [col for col in ex_params_df.columns if re.match('t\d\d?[a-z]?', col) or col == 'ttraj']
-#     ef_cols = [col for col in ex_params_df.columns if re.match('mag\d\d?[a-z]?', col)]
-#
-#     models = []
-#     for i, ep in ex_params_df.iterrows():
-#         tslices = list(ep[ef_tcols])
-#         tslices[0] = 0
-#         model = CovidModel(params='params.json', tslices=tslices, ef_by_slice=list(ep[ef_cols]))
-#         models.append(model)
-#
-#     return models
-
 
 def run():
     # get fit params
@@ -50,8 +29,6 @@ def run():
     hosp_data = [0]*actual_hosp_tmin + list(actual_hosp_df['currently_hospitalized'])
 
     # fetch external parameters to use for tslices and fixed efs
-    # models = models_from_external_params('model_params_with_variant_20210405.csv')
-    # model = models[0]
     model = CovidModel.from_fit(engine, fit_id)
     tslices = [int(x) for x in model.tslices[:-3]]
     tslices += list(range(tslices[-1] + 14, actual_hosp_tmax - 19, 14)) + [actual_hosp_tmax + 1]

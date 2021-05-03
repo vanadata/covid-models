@@ -175,9 +175,6 @@ class CovidModel:
         rate_df = full_empty_df.join(rate_df, how='left').fillna(0)
 
         # when total vaccines given exceeds max_vacc * groupN, set rate to 0, and reallocate vaccines to younger group
-        # max_vacc_by_group = pd.DataFrame.from_dict(self.gparams['max_vacc'], orient='index', columns=['max_vacc'])
-        # population_by_group = pd.DataFrame.from_dict(self.gparams['groupN'], orient='index', columns=['population'])
-        # rate_df = rate_df.join(pd.DataFrame.from_dict(self.gparams['max_vacc'], orient='index', columns=['max_vacc']), on='group')
         rate_df = rate_df.join(pd.DataFrame.from_dict(self.gparams['groupN'], orient='index', columns=['population']), on='group')
         cumu_vacc = {g: 0 for g in self.groups}
         for t in self.trange:

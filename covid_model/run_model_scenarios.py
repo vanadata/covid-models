@@ -57,6 +57,7 @@ def main():
                 run_model(engine, current_fit_id, tmax=tmax, tc_shift=tcs, tc_shift_date=tcsd, update_params=change_params,
                           tags={'run_type': 'TC Shift Projection', 'batch': batch, 'tc_shift': f'{int(100*tcs)}%', 'tc_shift_date': tcsd.strftime('%b %#d'), 'vacc_cap': vacc_cap_label})
 
+
 if __name__ == '__main__':
     main()
 
