@@ -1,4 +1,4 @@
-from db_utils.conn import db_engine
+from db import db_engine
 from model import CovidModel, CovidModelFit
 import pandas as pd
 import datetime as dt
@@ -8,6 +8,7 @@ from time import perf_counter
 import urllib.request as request
 import json as json
 import argparse
+
 
 def run():
     # get fit params
