@@ -266,10 +266,12 @@ class CovidModel:
         variant_tmax = sums.index.get_level_values('t').max()
         for t in self.trange:
             if t >= variant_tmin:
-                for group in self.groups:
-                    for fr, to, label in self.transitions:
+                for fr, to, label in self.transitions:
+                    for group in self.groups:
                         # if t is greater than variant_tmax, just pull the multiplier at variant_tmax
                         self.gparams_lookup[t][group][label] *= sums.loc[(min(t, variant_tmax), group), f'{label}_flow']
+                    if len(set(self.gparams_lookup[t][g][label] for g in self.groups)) == 1:
+                        self.gparams_lookup[t][None][label] = self.gparams_lookup[t][self.groups[0]][label]
 
     # provide a dataframe with [compartment]_prev as the initial prevalence and this function will add the flows necessary to calc the downstream multipliers
     def calc_multipliers(self, df, start_at=0, end_at=10, add_remaining=True):
@@ -344,10 +346,10 @@ class CovidModel:
         self.ef_by_slice.append(ef)
         self.fit_id = None
 
-    # I don't know what this represents, but it's a value that appears a couple times in the diff eq, and it depends on totals instead of values for a specific group
+    # this is the rate of flow from S -> E, based on beta, current prevalence, TC and a bunch of paramaters that should probably be deprecated
     @staticmethod
-    def daily_transmission_per_susc(I_total, A_total, N, beta, temp, mask, lamb, siI, ramp, **excess_args):
-        return beta * temp * (
+    def daily_transmission_per_susc(ef, I_total, A_total, rel_inf_prob, N, beta, temp, mask, lamb, siI, ramp, **excess_args):
+        return beta * (1 - ef) * rel_inf_prob * temp * (
                 I_total * (1 - (mask * 0.03)) * lamb * (1 - (siI + ramp)) + A_total * (1 - (mask * 0.2667))) / N
 
     # the diff eq for a single group; will be called four times in the actual diff eq
@@ -381,11 +383,11 @@ class CovidModel:
 
         # build dy
         dy = []
-        trans = CovidModel.daily_transmission_per_susc(I_total=ydf['I'].sum(), A_total=ydf['A'].sum(), **params[None])
+        transm = CovidModel.daily_transmission_per_susc(ef, I_total=ydf['I'].sum(), A_total=ydf['A'].sum(), **params[None])
         for group in self.groups:
             dy += CovidModel.single_group_seir(
                 single_group_y=list(ydf.loc[group, :]),
-                transm_per_susc=trans * (1 - ef) * params[group]['rel_inf_prob'],
+                transm_per_susc=transm,
                 **params[group])
 
         return dy

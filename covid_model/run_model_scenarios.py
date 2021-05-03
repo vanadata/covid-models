@@ -29,10 +29,10 @@ def run_model(engine, fit_id, tmax=600, tags=None, tc_shift=None, tc_shift_date=
 def main():
     engine = db_engine()
     tmax = 600
-    prior_fit_id = 905
-    current_fit_id = 1026
+    prior_fit_id = 1026
+    current_fit_id = 1044
     tc_shifts = [-0.07, -0.14]
-    tc_shift_dates = [dt.datetime(2021, 4, 30), dt.datetime(2021, 5, 14), dt.datetime(2021, 5, 28)]
+    tc_shift_dates = [dt.datetime(2021, 5, 7), dt.datetime(2021, 5, 28), dt.datetime(2021, 6, 11)]
     vacc_caps = {
         'high vaccine uptake': {"0-19": 0.2046, "20-39": 0.80, "40-64": 0.80, "65+": 0.94},
         'low vaccine uptake': {"0-19": 0.1279, "20-39": 0.5, "40-64": 0.62, "65+": 0.94}}

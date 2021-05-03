@@ -11,7 +11,7 @@ import json
 
 
 def main():
-    fit_id = 1026
+    fit_id = 1044
 
     engine = db_engine()
     model = CovidModel.from_fit(engine, fit_id, params='params.json')
@@ -23,6 +23,7 @@ def main():
     print(tags)
     model.prep()
     model.solve_seir()
+    model.plot_hosps()
     # model.write_to_db(engine, tags=tags)
 
 
