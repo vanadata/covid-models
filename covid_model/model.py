@@ -3,11 +3,12 @@ import math
 import datetime as dt
 import scipy.integrate as spi
 import scipy.optimize as spo
+import scipy.stats as sps
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from sqlalchemy import MetaData
 from datetime import datetime
+import copy
 from time import perf_counter
 
 
@@ -86,12 +87,11 @@ class CovidModel:
     # create using on a fit that was run previously or manually inserted into the database
     @staticmethod
     def from_fit(conn, fit_id, params=None):
-        df = pd.read_sql_query(f"select * from stage.covid_model_fits where id = '{fit_id}'", con=conn, coerce_float=True)
-        gparams = params if params is not None else df['model_params'][0]
+        fit = CovidModelFit.from_db(conn, fit_id)
+        if params is not None:
+            fit.model.gparams = params if type(params) == dict else json.load(open(params)) if params else None
 
-        tslices = df['tslices'][0]
-        efs = df['efs'][0]
-        return CovidModel(gparams, tslices, ef_by_slice=efs, fit_id=df['id'][0], engine=conn)
+        return fit.model
 
     # coerce a "y", a list of length (num of vars)*(num of groups), into a dataframe with dims (num of groups)x(num of vars)
     @classmethod
@@ -346,7 +346,7 @@ class CovidModel:
         self.ef_by_slice.append(ef)
         self.fit_id = None
 
-    # this is the rate of flow from S -> E, based on beta, current prevalence, TC and a bunch of paramaters that should probably be deprecated
+    # this is the rate of flow from S -> E, based on beta, current prevalence, TC, variants, and a bunch of paramaters that should probably be deprecated
     @staticmethod
     def daily_transmission_per_susc(ef, I_total, A_total, rel_inf_prob, N, beta, temp, mask, lamb, siI, ramp, **excess_args):
         return beta * (1 - ef) * rel_inf_prob * temp * (
@@ -421,22 +421,10 @@ class CovidModel:
         sum_df = self.solution_ydf_summed
         return sum_df['E'] - sum_df['E'].shift(1) + sum_df['E'].shift(1) / self.gparams['alpha']
 
-    # plot the hospitalizations using matplotlib
-    def plot_hosps(self, actual_hosp=None):
-        if actual_hosp is not None:
-            tmax = min(self.tmax, len(actual_hosp))
-            plt.plot(self.trange[:tmax], actual_hosp[:tmax], 'r', label='Actual Hosp')
-        plt.plot(self.trange, self.total_hosps(), label='Modeled Hosp')
-        plt.legend(loc='best')
-        plt.xlabel('Days')
-        plt.grid()
-        plt.show()
-
     # create a new fit and assign to this model
     def gen_fit(self, engine, label=None, tags=None):
-        fit = CovidModelFit(self, label=label, tags=tags)
+        fit = CovidModelFit(self, fixed_efs=self.ef_by_slice, label=label, tags=tags)
         fit.fit_params = None
-        fit.best_efs = self.ef_by_slice
         fit.write_to_db(engine)
 
     # write to stage.covid_model_results in Postgres
@@ -479,14 +467,10 @@ class CovidModelFit:
         self.label = label
         self.tags = tags if tags else {}
         self.fixed_efs = list(fixed_efs) if fixed_efs else []
-        self.results = None
-        self.best_efs = None
+        self.fitted_efs = None
+        self.fitted_efs_cov = None
 
         self.fit_params = {} if fit_params is None else fit_params
-
-        # set fit_count
-        if 'fit_count' not in self.fit_params.keys():
-            self.fit_params['fit_count'] = self.ef_count
 
         # set fit param efs0
         if 'efs0' not in self.fit_params.keys():
@@ -500,6 +484,29 @@ class CovidModelFit:
         if 'ef_max' not in self.fit_params.keys():
             self.fit_params['ef_max'] = 0.99
 
+    @staticmethod
+    def from_db(conn, fit_id):
+        df = pd.read_sql_query(f"select * from stage.covid_model_fits where id = '{fit_id}'", con=conn, coerce_float=True)
+
+        tslices = df['tslices'][0]
+        efs = df['efs'][0]
+        efs_cov = df['efs_cov'][0]
+        fit_params = df['fit_params'][0]
+
+        fit_count = len(efs_cov) if efs_cov is not None else fit_params['fit_count']
+        model = CovidModel(df['model_params'][0], tslices, ef_by_slice=efs, fit_id=fit_id, engine=conn)
+
+        fit = CovidModelFit(
+            model=model
+            , fixed_efs=efs[:-fit_count]
+            , fit_params=fit_params
+            , label=df['fit_label'][0]
+            , tags=df['tags'][0]
+        )
+        fit.fitted_efs = efs[-fit_count:]
+        fit.fitted_efs_cov = efs_cov
+        return fit
+
     # the number of total ef values, including fixed values
     @property
     def ef_count(self):
@@ -510,36 +517,53 @@ class CovidModelFit:
     def fit_count(self):
         return self.ef_count - len(self.fixed_efs)
 
+    @property
+    def best_efs(self):
+        return list(self.fixed_efs) + list(self.fitted_efs)
+
     # add a tag, to make fits easier to query
     def add_tag(self, tag_type, tag_value):
         self.tags[tag_type] = tag_value
 
-    # the cost function: runs the model using a given set of efs, and returns the sum of the squared residuals
-    def cost(self, ef_by_slice: list):
+    # runs the model using a given set of efs, and returns the modeled hosp values (which will be fit to actual hosp data)
+    def run_model_and_get_total_hosps(self, ef_by_slice):
         extended_ef_by_slice = self.fixed_efs + list(ef_by_slice)
         self.model.set_ef_by_t(extended_ef_by_slice)
-        t0 = perf_counter()
         self.model.solve_seir()
-        t1 = perf_counter()
-        # print(f'Cost function ran in {t1 - t0} secs.')
-        modeled = self.model.total_hosps()
+        return self.model.total_hosps()
+
+    # the cost function: runs the model using a given set of efs, and returns the sum of the squared residuals
+    def cost(self, ef_by_slice: list):
+        modeled = self.run_model_and_get_total_hosps(ef_by_slice)
         res = [m - a if not np.isnan(a) else 0 for m, a in zip(modeled, list(self.actual_hosp))]
         c = sum(e**2 for e in res)
         return c
 
     # run an optimization to minimize the cost function using scipy.optimize.minimize()
-    def run(self):
+    # method = 'curve_fit' or 'minimize'
+    def run(self, method='curve_fit'):
         if self.model.gparams_lookup is None:
             self.model.prep()
-        # run minimization
-        self.results = spo.minimize(
-            lambda x: self.cost(x)
-            , self.fit_params['efs0']
-            , method='L-BFGS-B'
-            , bounds=[(self.fit_params['ef_min'], self.fit_params['ef_max'])] * self.fit_count
-            , options=self.fit_params)
 
-        self.best_efs = list(self.fixed_efs) + list(self.results.x)
+        # run fit
+        if method == 'curve_fit':
+            def func(trange, *efs):
+                return self.run_model_and_get_total_hosps(efs)
+            self.fitted_efs, self.fitted_efs_cov = spo.curve_fit(
+                f=func
+                , xdata=self.model.trange
+                , ydata=self.actual_hosp
+                , p0=self.fit_params['efs0'])
+        elif method == 'minimize':
+            minimization_results = spo.minimize(
+                lambda x: self.cost(x)
+                , self.fit_params['efs0']
+                , method='L-BFGS-B'
+                , bounds=[(self.fit_params['ef_min'], self.fit_params['ef_max'])] * self.fit_count
+                , options=self.fit_params)
+            print(minimization_results)
+            self.fitted_efs = minimization_results.x
+
         self.model.set_ef_by_t(self.best_efs)
 
     # write the fit as a single row to stage.covid_model_fits, describing the optimized ef values
@@ -548,6 +572,8 @@ class CovidModelFit:
         metadata.reflect(engine, only=['covid_model_fits'])
         fits_table = metadata.tables['stage.covid_model_fits']
 
+        self.fit_params['fit_count'] = self.fit_count
+
         stmt = fits_table.insert().values(tslices=[int(x) for x in self.model.tslices],
                                     model_params=self.model.gparams,
                                     fit_params=self.fit_params,
@@ -555,8 +581,8 @@ class CovidModelFit:
                                     observed_efs=self.model.obs_ef_by_slice,
                                     created_at=datetime.now(),
                                     fit_label=self.label,
-                                    tags=self.tags
-                                          )
+                                    tags=self.tags,
+                                    efs_cov=[list(a) for a in self.fitted_efs_cov])
 
         conn = engine.connect()
         result = conn.execute(stmt)

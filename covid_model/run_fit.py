@@ -1,5 +1,6 @@
 from db import db_engine
 from model import CovidModel, CovidModelFit
+from hospitalizations import get_hosps
 import pandas as pd
 import datetime as dt
 import numpy as np
@@ -23,16 +24,12 @@ def run():
 
     # load actual hospitalization data for fitting
     engine = db_engine()
-    actual_hosp_df = pd.read_sql('select * from cdphe.emresource_hospitalizations', engine)
-    actual_hosp_df['t'] = ((pd.to_datetime(actual_hosp_df['measure_date']) - dt.datetime(2020, 1, 24)) / np.timedelta64(1, 'D')).astype(int)
-    actual_hosp_tmin = actual_hosp_df[actual_hosp_df['currently_hospitalized'].notnull()]['t'].min()
-    actual_hosp_tmax = actual_hosp_df[actual_hosp_df['currently_hospitalized'].notnull()]['t'].max()
-    hosp_data = [0]*actual_hosp_tmin + list(actual_hosp_df['currently_hospitalized'])
+    hosp_data = get_hosps(engine, dt.datetime(2020, 1, 24))
 
     # fetch external parameters to use for tslices and fixed efs
     model = CovidModel.from_fit(engine, fit_id)
     tslices = [int(x) for x in model.tslices[:-3]]
-    tslices += list(range(tslices[-1] + 14, actual_hosp_tmax - 19, 14)) + [actual_hosp_tmax + 1]
+    tslices += list(range(tslices[-1] + 14, len(hosp_data) - 1 - 19, 14)) + [len(hosp_data)]
 
     fit_count = fitted_tc_count
     fixed_efs = [float(x) for x in model.ef_by_slice[:(len(tslices) - 1 - fit_count)]]
@@ -51,7 +48,6 @@ def run():
         fit.run()
         t1_stop = perf_counter()
         print(f'Transmission control fitting completed in {t1_stop - t1_start} seconds.')
-        print(fit.results)
         fixed_efs.append(fit.best_efs[i-1])
         fit.write_to_db(engine)
 
@@ -60,7 +56,6 @@ def run():
     print('t-slices: ', model.tslices)
     print('TC by t-slice:', fit.best_efs)
     model.write_to_db(db_engine())
-    model.plot_hosps(hosp_data)
 
 
 if __name__ == '__main__':

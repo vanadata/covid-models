@@ -6,7 +6,6 @@ import re
 import copy
 from db_utils.conn import db_engine
 import datetime as dt
-import matplotlib.pyplot as plt
 import json
 
 
@@ -29,17 +28,21 @@ def run_model(engine, fit_id, tmax=600, tags=None, tc_shift=None, tc_shift_date=
 def main():
     engine = db_engine()
     tmax = 600
-    prior_fit_id = 1026
-    current_fit_id = 1044
+    prior_fit_id = 1044
+    current_fit_id = 1077
     tc_shifts = [-0.07, -0.14]
-    tc_shift_dates = [dt.datetime(2021, 5, 7), dt.datetime(2021, 5, 28), dt.datetime(2021, 6, 11)]
+    tc_shift_dates = [dt.datetime(2021, 5, 14), dt.datetime(2021, 5, 28), dt.datetime(2021, 6, 11)]
     vacc_caps = {
-        'high vaccine uptake': {"0-19": 0.2046, "20-39": 0.80, "40-64": 0.80, "65+": 0.94},
-        'low vaccine uptake': {"0-19": 0.1279, "20-39": 0.5, "40-64": 0.62, "65+": 0.94}}
+        'high vaccine uptake': {"0-19": 0.3413, "20-39": 0.80, "40-64": 0.80, "65+": 0.94},
+        'low vaccine uptake': {"0-19": 0.2134, "20-39": 0.5, "40-64": 0.62, "65+": 0.94}}
     batch = 'standard_' + dt.datetime.now().strftime('%Y%m%d_%H%M%S')
 
     # prior fit
-    run_model(engine, prior_fit_id, tmax=tmax, tags={'run_type': 'Prior', 'batch': batch})
+    with open('params.json') as params_file:
+        prior_variant_params = json.load(params_file)['variants']
+    prior_variant_params['b117']['theta_file_path'] = 'proportionvariantovertime_prior.csv'
+    prior_variant_params['cali']['theta_file_path'] = 'proportionvariantovertime_prior.csv'
+    run_model(engine, prior_fit_id, tmax=tmax, tags={'run_type': 'Prior', 'batch': batch}, update_params={'variants': prior_variant_params})
 
     # current fit
     run_model(engine, current_fit_id, tmax=tmax, tags={'run_type': 'Current', 'batch': batch})
