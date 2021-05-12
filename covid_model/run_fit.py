@@ -51,7 +51,6 @@ def run():
         fit.run()
         t1_stop = perf_counter()
         print(f'Transmission control fitting completed in {t1_stop - t1_start} seconds.')
-        print(fit.results)
         fixed_efs.append(fit.best_efs[i-1])
         fit.write_to_db(engine)
 

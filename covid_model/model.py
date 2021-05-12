@@ -3,11 +3,13 @@ import math
 import datetime as dt
 import scipy.integrate as spi
 import scipy.optimize as spo
+import scipy.stats as sps
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from sqlalchemy import MetaData
 from datetime import datetime
+import copy
 from time import perf_counter
 
 
@@ -346,7 +348,7 @@ class CovidModel:
         self.ef_by_slice.append(ef)
         self.fit_id = None
 
-    # this is the rate of flow from S -> E, based on beta, current prevalence, TC and a bunch of paramaters that should probably be deprecated
+    # this is the rate of flow from S -> E, based on beta, current prevalence, TC, variants, and a bunch of paramaters that should probably be deprecated
     @staticmethod
     def daily_transmission_per_susc(ef, I_total, A_total, rel_inf_prob, N, beta, temp, mask, lamb, siI, ramp, **excess_args):
         return beta * (1 - ef) * rel_inf_prob * temp * (
@@ -479,7 +481,8 @@ class CovidModelFit:
         self.label = label
         self.tags = tags if tags else {}
         self.fixed_efs = list(fixed_efs) if fixed_efs else []
-        self.results = None
+        self.fitted_efs = None
+        self.fitted_efs_cov = None
         self.best_efs = None
 
         self.fit_params = {} if fit_params is None else fit_params
@@ -514,33 +517,64 @@ class CovidModelFit:
     def add_tag(self, tag_type, tag_value):
         self.tags[tag_type] = tag_value
 
-    # the cost function: runs the model using a given set of efs, and returns the sum of the squared residuals
-    def cost(self, ef_by_slice: list):
+    # runs the model using a given set of efs, and returns the modeled hosp values (which will be fit to actual hosp data)
+    def run_model_and_get_total_hosps(self, ef_by_slice):
         extended_ef_by_slice = self.fixed_efs + list(ef_by_slice)
         self.model.set_ef_by_t(extended_ef_by_slice)
-        t0 = perf_counter()
         self.model.solve_seir()
-        t1 = perf_counter()
-        # print(f'Cost function ran in {t1 - t0} secs.')
-        modeled = self.model.total_hosps()
+        return self.model.total_hosps()
+
+    # the cost function: runs the model using a given set of efs, and returns the sum of the squared residuals
+    def cost(self, ef_by_slice: list):
+        modeled = self.run_model_and_get_total_hosps(ef_by_slice)
         res = [m - a if not np.isnan(a) else 0 for m, a in zip(modeled, list(self.actual_hosp))]
         c = sum(e**2 for e in res)
         return c
 
     # run an optimization to minimize the cost function using scipy.optimize.minimize()
-    def run(self):
+    # method = 'curve_fit' or 'minimize'
+    def run(self, method='curve_fit'):
         if self.model.gparams_lookup is None:
             self.model.prep()
-        # run minimization
-        self.results = spo.minimize(
-            lambda x: self.cost(x)
-            , self.fit_params['efs0']
-            , method='L-BFGS-B'
-            , bounds=[(self.fit_params['ef_min'], self.fit_params['ef_max'])] * self.fit_count
-            , options=self.fit_params)
 
-        self.best_efs = list(self.fixed_efs) + list(self.results.x)
+        # run fit
+        if method == 'curve_fit':
+            def func(trange, *efs):
+                return self.run_model_and_get_total_hosps(efs)
+            self.fitted_efs, self.fitted_efs_cov = spo.curve_fit(
+                f=func
+                , xdata=self.model.trange
+                , ydata=self.actual_hosp
+                , p0=self.fit_params['efs0'])
+        elif method == 'minimize':
+            minimization_results = spo.minimize(
+                lambda x: self.cost(x)
+                , self.fit_params['efs0']
+                , method='L-BFGS-B'
+                , bounds=[(self.fit_params['ef_min'], self.fit_params['ef_max'])] * self.fit_count
+                , options=self.fit_params)
+            print(minimization_results)
+            self.fitted_efs = minimization_results.x
+
+        self.best_efs = list(self.fixed_efs) + list(self.fitted_efs)
         self.model.set_ef_by_t(self.best_efs)
+
+    # UQ sqaghetti plot
+    def spaghetti_plot(self, sample_n=100, tmax=600):
+        fitted_efs_dist = sps.multivariate_normal(mean=self.fitted_efs, cov=self.fitted_efs_cov)
+        samples = fitted_efs_dist.rvs(sample_n)
+
+        plt.plot(self.model.trange, self.actual_hosp, c='red')
+        model = copy.copy(self.model)
+        model.add_tslice(tmax, 0)
+        model.prep()
+        for sample_fitted_efs in samples:
+            model.set_ef_by_t(list(self.fixed_efs) + list(sample_fitted_efs) + [sample_fitted_efs[-1]])
+            model.solve_seir()
+            plt.plot(model.trange, model.total_hosps(), c='darkblue', alpha=0.03)
+
+        plt.show()
+
 
     # write the fit as a single row to stage.covid_model_fits, describing the optimized ef values
     def write_to_db(self, engine):
@@ -555,8 +589,8 @@ class CovidModelFit:
                                     observed_efs=self.model.obs_ef_by_slice,
                                     created_at=datetime.now(),
                                     fit_label=self.label,
-                                    tags=self.tags
-                                          )
+                                    tags=self.tags,
+                                    efs_cov=[list(a) for a in self.fitted_efs_cov])
 
         conn = engine.connect()
         result = conn.execute(stmt)
