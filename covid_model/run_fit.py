@@ -56,7 +56,6 @@ def run():
     print('t-slices: ', model.tslices)
     print('TC by t-slice:', fit.best_efs)
     model.write_to_db(db_engine())
-    model.plot_hosps(hosp_data)
 
 
 if __name__ == '__main__':

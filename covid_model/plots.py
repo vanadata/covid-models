@@ -8,7 +8,11 @@ import copy
 
 def actual_hosps(engine, **plot_params):
     hosps = get_hosps(engine)
-    plt.plot(range(0, len(hosps)), get_hosps(engine), **{'color': 'red', **plot_params})
+    plt.plot(range(0, len(hosps)), get_hosps(engine), **{'color': 'red', 'label': 'Actual Hosps.', **plot_params})
+
+
+def total_hosps(model, **plot_params):
+    plt.plot(model.trange, model.total_hosps(), {'c': 'blue', 'label': 'Modeled Hosps.', **plot_params})
 
 
 # UQ sqaghetti plot
@@ -35,4 +39,7 @@ if __name__ == '__main__':
     actual_hosps(engine)
     uq_spaghetti(CovidModelFit.from_db(engine, 1133), sample_n=10)
 
+    plt.legend(loc='best')
+    plt.xlabel('Days')
+    plt.grid()
     plt.show()

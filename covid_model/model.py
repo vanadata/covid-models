@@ -6,7 +6,6 @@ import scipy.optimize as spo
 import scipy.stats as sps
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from sqlalchemy import MetaData
 from datetime import datetime
 import copy
@@ -422,17 +421,6 @@ class CovidModel:
         sum_df = self.solution_ydf_summed
         return sum_df['E'] - sum_df['E'].shift(1) + sum_df['E'].shift(1) / self.gparams['alpha']
 
-    # plot the hospitalizations using matplotlib
-    def plot_hosps(self, actual_hosp=None):
-        if actual_hosp is not None:
-            tmax = min(self.tmax, len(actual_hosp))
-            plt.plot(self.trange[:tmax], actual_hosp[:tmax], 'r', label='Actual Hosp')
-        plt.plot(self.trange, self.total_hosps(), label='Modeled Hosp')
-        plt.legend(loc='best')
-        plt.xlabel('Days')
-        plt.grid()
-        plt.show()
-
     # create a new fit and assign to this model
     def gen_fit(self, engine, label=None, tags=None):
         fit = CovidModelFit(self, fixed_efs=self.ef_by_slice, label=label, tags=tags)
@@ -577,22 +565,6 @@ class CovidModelFit:
             self.fitted_efs = minimization_results.x
 
         self.model.set_ef_by_t(self.best_efs)
-
-    # UQ sqaghetti plot
-    def spaghetti_plot(self, sample_n=100, tmax=600):
-        fitted_efs_dist = sps.multivariate_normal(mean=self.fitted_efs, cov=self.fitted_efs_cov)
-        samples = fitted_efs_dist.rvs(sample_n)
-
-        plt.plot(self.model.trange, self.actual_hosp, c='red')
-        model = copy.copy(self.model)
-        model.add_tslice(tmax, 0)
-        model.prep()
-        for sample_fitted_efs in samples:
-            model.set_ef_by_t(list(self.fixed_efs) + list(sample_fitted_efs) + [sample_fitted_efs[-1]])
-            model.solve_seir()
-            plt.plot(model.trange, model.total_hosps(), c='darkblue', alpha=0.03)
-
-        plt.show()
 
     # write the fit as a single row to stage.covid_model_fits, describing the optimized ef values
     def write_to_db(self, engine):

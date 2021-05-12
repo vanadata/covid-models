@@ -6,7 +6,6 @@ import re
 import copy
 from db_utils.conn import db_engine
 import datetime as dt
-import matplotlib.pyplot as plt
 import json
 
 
