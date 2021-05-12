@@ -88,12 +88,11 @@ class CovidModel:
     # create using on a fit that was run previously or manually inserted into the database
     @staticmethod
     def from_fit(conn, fit_id, params=None):
-        df = pd.read_sql_query(f"select * from stage.covid_model_fits where id = '{fit_id}'", con=conn, coerce_float=True)
-        gparams = params if params is not None else df['model_params'][0]
+        fit = CovidModelFit.from_db(conn, fit_id)
+        if params is not None:
+            fit.model.gparams = params if type(params) == dict else json.load(open(params)) if params else None
 
-        tslices = df['tslices'][0]
-        efs = df['efs'][0]
-        return CovidModel(gparams, tslices, ef_by_slice=efs, fit_id=df['id'][0], engine=conn)
+        return fit.model
 
     # coerce a "y", a list of length (num of vars)*(num of groups), into a dataframe with dims (num of groups)x(num of vars)
     @classmethod
@@ -436,9 +435,8 @@ class CovidModel:
 
     # create a new fit and assign to this model
     def gen_fit(self, engine, label=None, tags=None):
-        fit = CovidModelFit(self, label=label, tags=tags)
+        fit = CovidModelFit(self, fixed_efs=self.ef_by_slice, label=label, tags=tags)
         fit.fit_params = None
-        fit.best_efs = self.ef_by_slice
         fit.write_to_db(engine)
 
     # write to stage.covid_model_results in Postgres
@@ -483,13 +481,8 @@ class CovidModelFit:
         self.fixed_efs = list(fixed_efs) if fixed_efs else []
         self.fitted_efs = None
         self.fitted_efs_cov = None
-        self.best_efs = None
 
         self.fit_params = {} if fit_params is None else fit_params
-
-        # set fit_count
-        if 'fit_count' not in self.fit_params.keys():
-            self.fit_params['fit_count'] = self.ef_count
 
         # set fit param efs0
         if 'efs0' not in self.fit_params.keys():
@@ -503,6 +496,29 @@ class CovidModelFit:
         if 'ef_max' not in self.fit_params.keys():
             self.fit_params['ef_max'] = 0.99
 
+    @staticmethod
+    def from_db(conn, fit_id):
+        df = pd.read_sql_query(f"select * from stage.covid_model_fits where id = '{fit_id}'", con=conn, coerce_float=True)
+
+        tslices = df['tslices'][0]
+        efs = df['efs'][0]
+        efs_cov = df['efs_cov'][0]
+        fit_params = df['fit_params'][0]
+
+        fit_count = len(efs_cov) if efs_cov is not None else fit_params['fit_count']
+        model = CovidModel(df['model_params'][0], tslices, ef_by_slice=efs, fit_id=fit_id, engine=conn)
+
+        fit = CovidModelFit(
+            model=model
+            , fixed_efs=efs[:-fit_count]
+            , fit_params=fit_params
+            , label=df['fit_label'][0]
+            , tags=df['tags'][0]
+        )
+        fit.fitted_efs = efs[-fit_count:]
+        fit.fitted_efs_cov = efs_cov
+        return fit
+
     # the number of total ef values, including fixed values
     @property
     def ef_count(self):
@@ -512,6 +528,10 @@ class CovidModelFit:
     @property
     def fit_count(self):
         return self.ef_count - len(self.fixed_efs)
+
+    @property
+    def best_efs(self):
+        return list(self.fixed_efs) + list(self.fitted_efs)
 
     # add a tag, to make fits easier to query
     def add_tag(self, tag_type, tag_value):
@@ -556,7 +576,6 @@ class CovidModelFit:
             print(minimization_results)
             self.fitted_efs = minimization_results.x
 
-        self.best_efs = list(self.fixed_efs) + list(self.fitted_efs)
         self.model.set_ef_by_t(self.best_efs)
 
     # UQ sqaghetti plot
@@ -575,12 +594,13 @@ class CovidModelFit:
 
         plt.show()
 
-
     # write the fit as a single row to stage.covid_model_fits, describing the optimized ef values
     def write_to_db(self, engine):
         metadata = MetaData(schema='stage')
         metadata.reflect(engine, only=['covid_model_fits'])
         fits_table = metadata.tables['stage.covid_model_fits']
+
+        self.fit_params['fit_count'] = self.fit_count
 
         stmt = fits_table.insert().values(tslices=[int(x) for x in self.model.tslices],
                                     model_params=self.model.gparams,
