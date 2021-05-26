@@ -7,12 +7,12 @@ This repo contains a set of tools for running and processing the State of Colora
 #### Configuration and Data Dependencies
 
 - [params.json](covid_model/params.json) - json containing model parameters
-- proportionvariantovertime.csv(covid_model/proportionvariantovertime.csv) - csv containing daily breakdown of variant prevalence; file path set in [params.json](covid_model/params.json)
+- [proportionvariantovertime.csv](covid_model/proportionvariantovertime.csv) - csv containing daily breakdown of variant prevalence; file path set in [params.json](covid_model/params.json)
 - PostgreSQL database with the following tables:
- - cdphe.emresource_hospitalizations - source for real hospitalization data used for fitting and plotting
- - cdphe.covid19_county_summary - source for real vaccination data, used to set vaccination rate in model
- - stage.covid_model_fits - destination table containing the fitted parameters for past model runs
- - stage.covid_model_results - destination table containing the results of past model runs
+  - cdphe.emresource_hospitalizations - source for real hospitalization data used for fitting and plotting
+  - cdphe.covid19_county_summary - source for real vaccination data, used to set vaccination rate in model
+  - stage.covid_model_fits - destination table containing the fitted parameters for past model runs
+  - stage.covid_model_results - destination table containing the results of past model runs
 
 #### Run Scripts
 - Run fit to determine transmission control parameters using [run_fit.py](covid_model/run_fit.py) (`run_fit.py --help` for details regarding command line arguments)
