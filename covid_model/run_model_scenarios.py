@@ -1,10 +1,5 @@
-import urllib.request as request
-from covid_model.model import CovidModel
-import pandas as pd
-import numpy as np
-import re
-import copy
-from db_utils.conn import db_engine
+from model import CovidModel
+from db import db_engine
 import datetime as dt
 import json
 
@@ -28,13 +23,13 @@ def run_model(engine, fit_id, tmax=600, tags=None, tc_shift=None, tc_shift_date=
 def main():
     engine = db_engine()
     tmax = 600
-    prior_fit_id = 1044
-    current_fit_id = 1077
+    prior_fit_id = 1150
+    current_fit_id = 1225
     tc_shifts = [-0.07, -0.14]
-    tc_shift_dates = [dt.datetime(2021, 5, 14), dt.datetime(2021, 5, 28), dt.datetime(2021, 6, 11)]
+    tc_shift_dates = [dt.datetime(2021, 5, 28), dt.datetime(2021, 6, 12), dt.datetime(2021, 6, 26)]
     vacc_caps = {
         'high vaccine uptake': {"0-19": 0.3413, "20-39": 0.80, "40-64": 0.80, "65+": 0.94},
-        'low vaccine uptake': {"0-19": 0.2134, "20-39": 0.5, "40-64": 0.62, "65+": 0.94}}
+        'low vaccine uptake': {"0-19": 0.239, "20-39": 0.56, "40-64": 0.62, "65+": 0.94}}
     batch = 'standard_' + dt.datetime.now().strftime('%Y%m%d_%H%M%S')
 
     # prior fit

@@ -1,6 +1,8 @@
 from db import db_engine
 from model import CovidModel, CovidModelFit
 from hospitalizations import get_hosps
+from charts import actual_hosps, total_hosps
+import matplotlib.pyplot as plt
 import pandas as pd
 import datetime as dt
 import numpy as np
@@ -56,6 +58,10 @@ def run():
     print('t-slices: ', model.tslices)
     print('TC by t-slice:', fit.best_efs)
     model.write_to_db(db_engine())
+
+    actual_hosps(engine)
+    total_hosps(model)
+    plt.show()
 
 
 if __name__ == '__main__':
