@@ -5,7 +5,7 @@
       {"delay": 32, "value": 0.10}
     ],
     "immun_loss": [{"delay": 730, "value": 0.90}],
-    "multipliers": [{"delay": 14, "value": {"rel_inf_prob": 0.90, "pS": 0.5, "hosp": 0.5, "dnh": 0.5, "dh": 1}}]
+    "multipliers": [{"delay": 14, "value": {"rel_inf_prob": 0.10, "pS": 0.5, "hosp": 0.5, "dnh": 0.5, "dh": 1}}]
   },
   "jnj": {
     "immun_gain": [
@@ -13,6 +13,6 @@
       {"delay": 28, "value": 0.06}
     ],
     "immun_loss": [{"delay": 730, "value": 0.72}],
-    "multipliers": [{"delay": 14, "value": {"rel_inf_prob": 0.72, "pS": 0.5, "hosp": 0.5, "dnh": 0.5, "dh": 1}}]
+    "multipliers": [{"delay": 14, "value": {"rel_inf_prob": 0.28, "pS": 0.5, "hosp": 0.5, "dnh": 0.5, "dh": 1}}]
   }
 }

@@ -81,10 +81,21 @@ class CovidModel:
         # used to connect up with the matching fit in the database
         self.fit_id = fit_id
 
-    def prep(self, vacc_rate_method='db'):
-        self.set_gparams(self.gparams, vacc_rate_method)
+    def prep(self, vacc_proj_scen='high-uptake'):
+        vacc_proj_params = json.load(open('vacc_proj_params.json'))[vacc_proj_scen]
+        vacc_immun_params = json.load(open('vacc_immun_params.json'))
+
+        self.set_gparams(self.gparams)
+
+        self.set_vacc_rates(vacc_proj_params)
+        self.set_vacc_immun(vacc_immun_params)
+        self.apply_vacc_multipliers(vacc_immun_params)
+
         if self.ef_by_slice is not None:
             self.set_ef_by_t(self.ef_by_slice)
+
+        if 'variants' in self.gparams and self.gparams['variants']:
+            self.set_variant_params(self.gparams['variants'])
 
     # create using on a fit that was run previously or manually inserted into the database
     @staticmethod
@@ -155,9 +166,7 @@ class CovidModel:
         return df, max_t + 1
 
     # build dataframe containing vaccine first-dose rates by day by group by vaccine
-    def set_vacc_rates(self):
-        proj_params = json.load(open('vacc_proj_params.json'))['high-uptake']
-
+    def set_vacc_rates(self, proj_params):
         self.vacc_rate_df = get_vaccinations(self.engine
                              , from_date=self.datemin
                              , proj_to_date=self.daterange.max()
@@ -171,10 +180,7 @@ class CovidModel:
         self.vacc_rate_df['cumu'] = self.vacc_rate_df.groupby(['group', 'vacc'])['rate'].cumsum()
 
     # build dataframe containing the gain and loss of vaccine immunity by day by group
-    def set_vacc_immun(self):
-        # import parameters for setting immunity gain, immunity loss, and transition multipliers
-        immun_params = json.load(open('vacc_immun_params.json'))
-
+    def set_vacc_immun(self, immun_params):
         # set immunity gain and loss
         immun_gains = []
         immun_losses = []
@@ -182,8 +188,8 @@ class CovidModel:
             immun_gains += [delay_specs['value'] * self.vacc_rate_df['rate'].xs(vacc, level='vacc', drop_level=False).groupby('group').shift(delay_specs['delay']) for delay_specs in vacc_specs['immun_gain']]
             immun_losses += [delay_specs['value'] * self.vacc_rate_df['rate'].xs(vacc, level='vacc', drop_level=False).groupby('group').shift(delay_specs['delay']) for delay_specs in vacc_specs['immun_loss']]
         self.vacc_immun_df = pd.DataFrame()
-        self.vacc_immun_df['immun_gain'] = pd.concat(immun_gains).fillna(0).groupby(['t', 'group', 'vacc']).sum().sort_index()
-        self.vacc_immun_df['immun_loss'] = pd.concat(immun_losses).fillna(0).groupby(['t', 'group', 'vacc']).sum().sort_index()
+        self.vacc_immun_df['immun_gain'] = pd.concat(immun_gains).fillna(0).groupby(['t', 'group']).sum().sort_index()
+        self.vacc_immun_df['immun_loss'] = pd.concat(immun_losses).fillna(0).groupby(['t', 'group']).sum().sort_index()
 
         # add to gparams_lookup
         for t in self.trange:
@@ -207,6 +213,7 @@ class CovidModel:
 
         # drop rel_inf_prob because we're handling that through immun_gain and immun_loss
         self.vacc_trans_mults_df = pd.DataFrame.from_dict(combined_mults, orient='index').drop(columns='rel_inf_prob')
+        self.vacc_trans_mults_df.index.rename(['t', 'group'], inplace=True)
 
         # for every transition except s -> e, multiply the transition param by the vacc mult
         params = self.vacc_trans_mults_df.columns
@@ -217,7 +224,7 @@ class CovidModel:
 
     def write_vacc_to_csv(self, fname):
         df = pd.DataFrame()
-        df['first_shot_rate'] = self.vacc_rate_df.groupby(['t', 'group']).sum().fillna(0)
+        df['first_shot_rate'] = self.vacc_rate_df['rate'].groupby(['t', 'group']).sum().fillna(0)
         df = df.join(self.vacc_immun_df)
         df = df.join(self.vacc_trans_mults_df.rename(columns={col: f'{col}_mult' for col in self.vacc_trans_mults_df.columns}))
         df['first_shot_cumu'] = df['first_shot_rate'].groupby('group').cumsum()
@@ -300,16 +307,12 @@ class CovidModel:
                     self.gparams_lookup[t][None][k] = v
 
     # set global parameters and lookup dicts
-    def set_gparams(self, params, vacc_rate_method='db'):
+    def set_gparams(self, params):
         # load gparams
         self.gparams = params if type(params) == dict else json.load(open(params))
         self.gparams_lookup = {t: {g: dict() for g in self.groups} for t in self.trange}
         # build a dictionary of gparams for every (t, group) for convenient access
         self.set_generic_gparams(self.gparams)
-        # set vacc and variant params
-        self.set_vacc_params(self.gparams['vaccines'], vacc_rate_method)
-        if 'variants' in self.gparams and self.gparams['variants']:
-            self.set_variant_params(self.gparams['variants'])
 
     # set ef by slice and lookup dicts
     def set_ef_by_t(self, ef_by_slice):

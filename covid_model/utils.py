@@ -29,17 +29,14 @@ def get_params(input_params, t, tslices=None):
 
 
 def calc_multipliers(multipliers, prevalences):
-    # df = pd.DataFrame({'prev': prevalences, 'mult': multipliers})
-        # df.append({'prev': 1 - df.prev.sum(), 'mult': 1}, ignore_index=True)
     flow = prevalences * multipliers
     combined_mult = flow.sum()
-    # df['flow'] = df.prev * df.mult
-    # combined_mult = df.flow.sum()
     next_prev = flow / combined_mult
     return combined_mult, next_prev
 
 
 def calc_multiple_multipliers(transitions, multipliers, starting_prevalences):
+    # print(multipliers, starting_prevalences)
     starting_prevalences = np.array(starting_prevalences)
     if starting_prevalences.sum() != 1:
         starting_prevalences = np.append(starting_prevalences, 1 - starting_prevalences.sum())
