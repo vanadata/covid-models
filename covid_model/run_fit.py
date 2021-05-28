@@ -1,13 +1,10 @@
 from db import db_engine
-from model import CovidModel, CovidModelFit
-from hospitalizations import get_hosps
-import pandas as pd
+from model import CovidModelFit
+from data_imports import get_hosps
+from charts import actual_hosps, total_hosps
+import matplotlib.pyplot as plt
 import datetime as dt
-import numpy as np
-import re
 from time import perf_counter
-import urllib.request as request
-import json as json
 import argparse
 
 
@@ -27,35 +24,33 @@ def run():
     hosp_data = get_hosps(engine, dt.datetime(2020, 1, 24))
 
     # fetch external parameters to use for tslices and fixed efs
-    model = CovidModel.from_fit(engine, fit_id)
-    tslices = [int(x) for x in model.tslices[:-3]]
-    tslices += list(range(tslices[-1] + 14, len(hosp_data) - 1 - 19, 14)) + [len(hosp_data)]
+    fit = CovidModelFit.from_db(engine, fit_id)
+    tslices = [int(x) for x in fit.tslices[:-3]]
+    tslices += list(range(tslices[-1] + 14, len(hosp_data) - 1 - 13 , 14)) + [len(hosp_data)]
 
     fit_count = fitted_tc_count
-    fixed_efs = [float(x) for x in model.ef_by_slice[:(len(tslices) - 1 - fit_count)]]
+    fixed_efs = [float(x) for x in fit.efs[:(len(tslices) - 1 - fit_count)]]
 
-    # define model
+    # run fits
     for i in range(len(tslices) - fit_count, len(tslices) - batch_size + 1):
-        model = CovidModel(
-            params='params.json',
-            tslices=tslices[:(i+batch_size)])
-        model.engine = engine
-        model.prep()
-        fit = CovidModelFit(model, hosp_data, fixed_efs=fixed_efs, fit_params=vars(fit_params))
+        fit = CovidModelFit(tslices=tslices[:(i+batch_size)], fixed_efs=fixed_efs.copy(), actual_hosp=hosp_data, fit_params=vars(fit_params))
 
-        # run fit (or set hard-coded best_efs)
         t1_start = perf_counter()
-        fit.run()
+        fit.run(engine)
         t1_stop = perf_counter()
         print(f'Transmission control fitting completed in {t1_stop - t1_start} seconds.')
-        fixed_efs.append(fit.best_efs[i-1])
+        fixed_efs.append(fit.efs[i - 1])
         fit.write_to_db(engine)
 
     # run model with best_efs, and plot total hosps
-    model.solve_seir()
-    print('t-slices: ', model.tslices)
-    print('TC by t-slice:', fit.best_efs)
-    model.write_to_db(db_engine())
+    fit.model.solve_seir()
+    print('t-slices: ', fit.model.tslices)
+    print('TC by t-slice:', fit.efs)
+    fit.model.write_to_db(db_engine())
+
+    actual_hosps(engine)
+    total_hosps(fit.model)
+    plt.show()
 
 
 if __name__ == '__main__':

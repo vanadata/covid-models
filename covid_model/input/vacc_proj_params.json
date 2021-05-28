@@ -1,0 +1,19 @@
+{
+  "high-uptake": {
+      "lookback": 7,
+      "max_cumu": {
+          "0-19": 0.3413,
+          "20-39": 0.80,
+          "40-64": 0.80,
+          "65+": 0.96
+      },
+      "max_rate_per_remaining": 0.04,
+      "realloc_priority": null
+  },
+  "low-uptake": {
+      "lookback": 7,
+      "max_cumu": {"0-19": 0.239, "20-39": 0.56, "40-64": 0.62, "65+": 0.96},
+      "max_rate_per_remaining": 0.04,
+      "realloc_priority": null
+  }
+}

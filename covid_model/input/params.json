@@ -25,16 +25,22 @@
     }
   },
   "dh": {
-    "0-19": 0.005504587,
-    "20-39": 0.014716188,
-    "40-64": 0.057513214,
-    "65+": 0.160570555
+    "tslices": [159],
+    "value": {
+      "0-19": [0.005504587, 0.005504587],
+      "20-39": [0.015475, 0.015475],
+      "40-64": [0.0719, 0.05849],
+      "65+": [0.2197, 0.16519]
+    }
   },
   "dnh": {
-    "0-19": 0.000013,
-    "20-39": 0.0000822,
-    "40-64": 0.000622705,
-    "65+": 0.027971448
+    "tslices": [159],
+    "value": {
+      "0-19": [0.000013, 0.000013],
+      "20-39": [0.0001022, 0.0001022],
+      "40-64": [0.000698, 0.000698],
+      "65+": [0.02806, 0.0216]
+    }
   },
   "pID": 0,
   "lamb": 1.395,
@@ -64,69 +70,10 @@
         "65+": 0.94
   },
   "max_vacc_share_of_remaining": 0.04,
-  "vaccines": {
-    "mrna": {
-      "shots": {
-        "first_shot": {
-          "delay": 14,
-          "eff": 0.80,
-          "duration": 730,
-          "multipliers": {
-            "pS": 0.5,
-            "hosp": 0.5,
-            "dnh": 0.5,
-            "dh": 1
-          }
-        },
-        "second_shot": {
-          "delay": 32,
-          "eff": 0.10,
-          "duration": 730,
-          "multipliers": {
-            "pS": 0.5,
-            "hosp": 0.5,
-            "dnh": 0.5,
-            "dh": 1
-          }
-        }
-      }
-    },
-    "jnj": {
-      "projected_rate": {
-        "0-19": 200,
-        "20-39": 1000,
-        "40-64": 1500,
-        "65+": 300
-      },
-      "shots": {
-        "first_shot": {
-          "delay": 14,
-          "eff": 0.66,
-          "duration": 730,
-          "multipliers": {
-            "pS": 0.5,
-            "hosp": 0.5,
-            "dnh": 0.5,
-            "dh": 1
-          }
-        },
-        "second_shot": {
-          "delay": 28,
-          "eff": 0.72,
-          "duration": 730,
-          "multipliers": {
-            "pS": 0.5,
-            "hosp": 0.5,
-            "dnh": 0.5,
-            "dh": 1
-          }
-        }
-      }
-    }
-  },
+  "vaccines": {},
   "variants": {
     "b117": {
-      "theta_file_path": "proportionvariantovertime.csv",
+      "theta_file_path": "input/proportionvariantovertime.csv",
       "theta_column": "b117",
       "multipliers": {
         "hosp": {
@@ -152,7 +99,7 @@
       }
     },
     "cali": {
-      "theta_file_path": "proportionvariantovertime.csv",
+      "theta_file_path": "input/proportionvariantovertime.csv",
       "theta_column": "CAvariant",
       "multipliers": {
         "hosp": 1.0,
