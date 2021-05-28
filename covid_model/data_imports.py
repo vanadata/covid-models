@@ -61,11 +61,12 @@ def get_vaccinations(engine, from_date=None, proj_to_date=None, proj_lookback=7,
         # project rates based on the last {proj_lookback} days of data
         projected_rates = df.loc[(proj_from_date - dt.timedelta(days=proj_lookback)):].groupby(['group', 'vacc']).sum() / float(proj_lookback)
         # override rates using fixed values from proj_fixed_rates, when present
-        projected_rates['rate'] = pd.DataFrame(proj_fixed_rates).stack().combine_first(projected_rates['rate'])
+        if proj_fixed_rates:
+            projected_rates['rate'] = pd.DataFrame(proj_fixed_rates).stack().combine_first(projected_rates['rate'])
         # add projections to dataframe
         projections = pd.concat({d: projected_rates for d in proj_date_range})
         projections['is_projected'] = True
-        df = pd.concat([df, projections])
+        df = pd.concat([df, projections]).sort_index()
 
         # reduce rates to prevent cumulative vaccination from exceeding max_cumu
         if max_cumu:
@@ -76,7 +77,7 @@ def get_vaccinations(engine, from_date=None, proj_to_date=None, proj_lookback=7,
                     group = groups[i]
                     current_rate = df.loc[(d, group), 'rate'].sum()
                     if current_rate > 0:
-                        max_rate = max_rate_per_remaining * max_cumu[group]
+                        max_rate = max_rate_per_remaining * (max_cumu[group] - cumu_vacc[group])
                         percent_excess = max((current_rate - max_rate) / current_rate, 0)
                         for vacc in vaccs:
                             excess_rate = df.loc[(d, group, vacc), 'rate'] * percent_excess
@@ -89,11 +90,34 @@ def get_vaccinations(engine, from_date=None, proj_to_date=None, proj_lookback=7,
     return df
 
 
+def get_vaccinations_by_county(engine):
+    sql = """select 
+        dd.measure_date::date as measure_date
+        , c.county_id
+        , c.county_label as county
+        , g.age_group
+        , coalesce(sum(total_count) filter (where date_type like 'vaccine dose 1/%'), 0)::int as first_doses_given
+        , coalesce(sum(total_count) filter (where date_type = 'vaccine dose 1/2'), 0)::int as mrna_first_doses_given
+        , coalesce(sum(total_count) filter (where date_type = 'vaccine dose 1/1'), 0)::int  as jnj_doses_given
+    from generate_series('2020-12-01'::date, (select max(reporting_date) from cdphe.covid19_county_summary where date_type like 'vaccine dose 1/%'), interval '1 day') as dd (measure_date)
+    cross join geo_dev.us_counties c
+    cross join (select distinct count_type as age_group from cdphe.covid19_county_summary where date_type like 'vaccine dose 1/%') g
+    left join cdphe.covid19_county_summary v on lpad(v.county_fips_code::text, 5, '0') = c.county_id and dd.measure_date = v.reporting_date and g.age_group = v.count_type
+    where c.state_iso2 = 'CO'
+    group by 1, 2, 3, 4
+    order by 1, 2;
+    """
+    df = pd.read_sql(sql, engine)
+    return df
+
+
 if __name__ == '__main__':
     engine = db_engine()
-    get_vaccinations(
-        engine
-        , proj_to_date=dt.datetime(2021, 10, 31)
-        , proj_fixed_rates={'jnj': {"0-19": 200, "20-39": 1000, "40-64": 1500, "65+": 300}}
-        , max_cumu={"0-19": 0.8*1513005, "20-39": 0.8*1685869, "40-64": 0.8*1902963, "65+": 0.94*738958}
-        , realloc_priority=['65+', '40-64', '20-39', '0-19'])
+
+    hosps = pd.DataFrame(get_hosps_df(engine)).reset_index().rename(columns={'currently_hospitalized': 'Iht', 'measure_date': 'date'})
+    hosps['time'] = ((pd.to_datetime(hosps['date']) - dt.datetime(2020, 1, 24)) / np.timedelta64(1, 'D')).astype(int)
+    hosps[['time', 'date', 'Iht']].to_csv('output/CO_EMR_Hosp.csv', index=False)
+
+    vacc_by_county = get_vaccinations_by_county(engine)
+    vacc_by_county.to_csv('output/daily_vaccination_by_age_by_county.csv', index=False)
+

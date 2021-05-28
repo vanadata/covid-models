@@ -36,7 +36,6 @@ def calc_multipliers(multipliers, prevalences):
 
 
 def calc_multiple_multipliers(transitions, multipliers, starting_prevalences):
-    # print(multipliers, starting_prevalences)
     starting_prevalences = np.array(starting_prevalences)
     if starting_prevalences.sum() != 1:
         starting_prevalences = np.append(starting_prevalences, 1 - starting_prevalences.sum())
@@ -46,4 +45,4 @@ def calc_multiple_multipliers(transitions, multipliers, starting_prevalences):
     for fr, to, label in transitions:
         mults[label], prevs[to] = calc_multipliers(np.array([m[label] for m in multipliers]), np.array(prevs[fr]))
 
-    return mults
+    return mults, {k: v[:-1].sum() for k, v in prevs.items()}

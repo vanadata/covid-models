@@ -3,41 +3,10 @@ import math
 import datetime as dt
 import scipy.integrate as spi
 import scipy.optimize as spo
-import scipy.stats as sps
-import numpy as np
-import pandas as pd
 from sqlalchemy import MetaData
 from datetime import datetime
-from external_data import get_vaccinations
-import copy
-from time import perf_counter
+from data_imports import get_vaccinations, get_hosps
 from utils import *
-
-
-# tslices and values define a stepwise function; get the value of that function for a given t
-def get_value_from_slices(tslices, values, t):
-    if len(values) != len(tslices) - 1:
-        raise ValueError(f"Length of values ({len(values)}) must equal length of tslices ({len(tslices)}) - 1.")
-    for i in range(len(tslices)-1):
-        if tslices[i] <= t < tslices[i+1]:
-            # if i > len(values):
-            #     raise ValueError(f"")
-            return values[i]
-    raise ValueError(f"Cannot fetch value from slices because t={t} is out of range.")
-
-
-# recursive function to process parameters that include values for different time slices, and construct params for a specific t
-def get_params(input_params, t, tslices=None):
-    if type(input_params) == list:
-        value = get_value_from_slices([0]+tslices+[99999], input_params, t)
-        return get_params(value, t, tslices)
-    elif type(input_params) == dict:
-        if 'tslices' in input_params.keys():
-            return get_params(input_params['value'], t, tslices=input_params['tslices'])
-        else:
-            return {k: get_params(v, t, tslices) for k, v in input_params.items()}
-    else:
-        return input_params
 
 
 # class used to run the model given a set of parameters, including transmission control (ef)
@@ -57,20 +26,22 @@ class CovidModel:
     # the starting date of the model
     datemin = dt.datetime(2020, 1, 24)
 
-    def __init__(self, params, tslices, ef_by_slice=None, fit_id=None, engine=None):
+    def __init__(self, params, tslices, efs=None, fit_id=None, engine=None):
         self.tslices = list(tslices)
 
         # build global parameters from params file, creating dict lookups for easy access
         self.engine = engine
         self.gparams = params if type(params) == dict else json.load(open(params)) if params else None
         self.gparams_lookup = None
-        self.vacc_params_df = None
-        self.variant_params_df = None
-        self.variant_prev = None
-        self.variant_mults = None
 
-        # build ef from given efs by slice, creating dict lookup for easy access
-        self.ef_by_slice = ef_by_slice
+        # vaccines
+        self.vacc_rate_df = None
+        self.vacc_immun_df = None
+        self.vacc_trans_mults_df = None
+        self.vacc_prevalence_df = None
+
+        # transmission control parameters
+        self.efs = efs
         self.ef_by_t = None
 
         # the var values for the solution; these get populated when self.solve_seir is run
@@ -82,8 +53,8 @@ class CovidModel:
         self.fit_id = fit_id
 
     def prep(self, vacc_proj_scen='high-uptake'):
-        vacc_proj_params = json.load(open('vacc_proj_params.json'))[vacc_proj_scen]
-        vacc_immun_params = json.load(open('vacc_immun_params.json'))
+        vacc_proj_params = json.load(open('input/vacc_proj_params.json'))[vacc_proj_scen]
+        vacc_immun_params = json.load(open('input/vacc_immun_params.json'))
 
         self.set_gparams(self.gparams)
 
@@ -91,20 +62,32 @@ class CovidModel:
         self.set_vacc_immun(vacc_immun_params)
         self.apply_vacc_multipliers(vacc_immun_params)
 
-        if self.ef_by_slice is not None:
-            self.set_ef_by_t(self.ef_by_slice)
+        if self.efs is not None:
+            self.set_ef_by_t(self.efs)
 
         if 'variants' in self.gparams and self.gparams['variants']:
             self.set_variant_params(self.gparams['variants'])
 
-    # create using on a fit that was run previously or manually inserted into the database
-    @staticmethod
-    def from_fit(conn, fit_id, params=None):
-        fit = CovidModelFit.from_db(conn, fit_id)
-        if params is not None:
-            fit.model.gparams = params if type(params) == dict else json.load(open(params)) if params else None
+    def set_ef_from_db(self, fit_id, extend=True):
+        fit = CovidModelFit.from_db(self.engine, fit_id)
+        tslices = fit.tslices
+        efs = fit.efs
+        if extend and self.tmax > tslices[-1]:
+            tslices.append(self.tmax)
+            efs.append(efs[-1])
 
-        return fit.model
+        self.tslices = tslices
+        self.efs = efs
+        self.set_ef_by_t(self.efs)
+
+    # create using on a fit that was run previously or manually inserted into the database
+    # @staticmethod
+    # def from_fit(conn, fit_id, params=None):
+    #     fit = CovidModelFit.from_db(conn, fit_id)
+    #     if params is not None:
+    #         fit.model.gparams = params if type(params) == dict else json.load(open(params)) if params else None
+    #
+    #     return fit.model
 
     # coerce a "y", a list of length (num of vars)*(num of groups), into a dataframe with dims (num of groups)x(num of vars)
     @classmethod
@@ -127,7 +110,19 @@ class CovidModel:
     # sum the solution vars to create a single df with total values across all groups
     @property
     def solution_ydf_summed(self):
-        return self.solution_ydf.groupby(level=['t']).sum()
+        return self.solution_ydf.groupby('t').sum()
+
+    # new exposures by day by group
+    @property
+    def new_exposures(self):
+        return self.solution_ydf['E'] / self.gparams['alpha']
+
+    # estimated reproduction number (length of infection * new_exposures / current_infections
+    @property
+    def re_estimates(self):
+        infect_duration = 1 / self.gparams['gamma']
+        infected = self.solution_ydf['I'].groupby('t').sum().shift(3)
+        return infect_duration * self.new_exposures.groupby('t').sum() / infected
 
     # calc the observed TC by applying the variant multiplier to the base TC
     @property
@@ -201,6 +196,7 @@ class CovidModel:
     def apply_vacc_multipliers(self, immun_params):
         # build dataframe
         combined_mults = {}
+        vacc_prevs = {}
         for t in self.trange:
             for g in self.groups:
                 mults, s_prevs = ([], [])
@@ -208,12 +204,15 @@ class CovidModel:
                     for delay_specs in vacc_specs['multipliers']:
                         mults.append(delay_specs['value'])
                         s_prevs.append(self.vacc_rate_df.loc[(max(t - delay_specs['delay'], 0), g, vacc), 'cumu'] / self.gparams['groupN'][g])
-                t0 = perf_counter()
-                combined_mults[(t, g)] = calc_multiple_multipliers(self.transitions, mults, s_prevs)
+                combined_mults[(t, g)], vacc_prevs[(t, g)] = calc_multiple_multipliers(self.transitions, mults, s_prevs)
 
-        # drop rel_inf_prob because we're handling that through immun_gain and immun_loss
+        # create a dataframe of the multipliers for each transition param; drop rel_inf_prob because we're handling that through immun_gain and immun_loss
         self.vacc_trans_mults_df = pd.DataFrame.from_dict(combined_mults, orient='index').drop(columns='rel_inf_prob')
         self.vacc_trans_mults_df.index.rename(['t', 'group'], inplace=True)
+
+        # create a dataframe of the estimated vaccine prevalence for individuals ENTERING each bucket
+        # for deaths, this definitely needs to averaged over history, since people stay dead a long time
+        self.vacc_prevalence_df = pd.DataFrame.from_dict(vacc_prevs, orient='index')
 
         # for every transition except s -> e, multiply the transition param by the vacc mult
         params = self.vacc_trans_mults_df.columns
@@ -316,20 +315,21 @@ class CovidModel:
 
     # set ef by slice and lookup dicts
     def set_ef_by_t(self, ef_by_slice):
-        self.ef_by_slice = ef_by_slice
+        self.efs = ef_by_slice
         self.ef_by_t = {t: get_value_from_slices(self.tslices, list(ef_by_slice), t) for t in self.trange}
 
     # extend the time range with an additional slice; should maybe change how this works to return a new CovidModel instead
     def add_tslice(self, t, ef):
         if t <= self.tslices[-2]:
-            raise ValueError('New tslices must be greater than the second to last tslices.')
+            raise ValueError(f'New tslice (t={t}) must be greater than the second to last tslices (t={self.tslices[-2]}).')
         if t < self.tmax:
             tmax = self.tmax
             self.tslices[-1] = t
             self.tslices.append(tmax)
         else:
             self.tslices.append(t)
-        self.ef_by_slice.append(ef)
+        self.efs.append(ef)
+        self.set_ef_by_t(self.efs)
         self.fit_id = None
 
     # this is the rate of flow from S -> E, based on beta, current prevalence, TC, variants, and a bunch of paramaters that should probably be deprecated
@@ -408,16 +408,20 @@ class CovidModel:
         return sum_df['E'] - sum_df['E'].shift(1) + sum_df['E'].shift(1) / self.gparams['alpha']
 
     # create a new fit and assign to this model
-    def gen_fit(self, engine, label=None, tags=None):
-        fit = CovidModelFit(self, fixed_efs=self.ef_by_slice, label=label, tags=tags)
+    def gen_fit(self, engine, tags=None):
+        fit = CovidModelFit(tslices=self.tslices, fixed_efs=self.efs, tags=tags)
         fit.fit_params = None
-        fit.write_to_db(engine)
+        fit.model = self
+        self.fit_id = fit.write_to_db(engine)
 
     # write to stage.covid_model_results in Postgres
-    def write_to_db(self, engine, label=None, tags=None):
+    def write_to_db(self, engine=None, tags=None, new_fit=False):
+        if engine is None:
+            engine = self.engine
+
         # if there's no existing fit assigned, create a new fit and assign that one
-        if self.fit_id is None or label is not None:
-            self.gen_fit(engine, label, tags)
+        if new_fit or self.fit_id is None:
+            self.gen_fit(engine, tags)
 
         # get the summed solution, add null index for the group, and then append to group solutions
         summed = self.solution_ydf_summed
@@ -430,9 +434,9 @@ class CovidModel:
         oef_series = pd.Series(self.obs_ef_by_t, name='observed_ef').rename_axis('t')
         df = df.join(ef_series).join(oef_series)
 
-        no_vacc_df = self.vacc_params_df.xs('none', level='vacc').xs('none', level='shot')
+        # add estimated vaccine prevalence in each compartment
         for v in ['s', 'e', 'i', 'h', 'd']:
-            df[f'vacc_prev_{v}'] = 1 - no_vacc_df[f'{v}_prev']
+            df[f'vacc_prev_{v}'] = self.vacc_prevalence_df[v]
 
         # add fit_id and created_at date
         df['fit_id'] = self.fit_id
@@ -452,14 +456,15 @@ class CovidModel:
 # class to find an optimal fit of transmission control (ef) values to produce model results that align with acutal hospitalizations
 class CovidModelFit:
 
-    def __init__(self, model: CovidModel, actual_hosp: list = None, fit_params=None, fixed_efs: list = None, label=None, tags=None):
-        self.model = model
+    def __init__(self, tslices, fixed_efs, fitted_efs=None, efs_cov=None, fit_params=None, actual_hosp=None, tags=None):
+        self.tslices = tslices
+        self.fixed_efs = fixed_efs
+        self.fitted_efs = fitted_efs
+        self.fitted_efs_cov = efs_cov
+        self.tags = tags
         self.actual_hosp = actual_hosp
-        self.label = label
-        self.tags = tags if tags else {}
-        self.fixed_efs = list(fixed_efs) if fixed_efs else []
-        self.fitted_efs = None
-        self.fitted_efs_cov = None
+
+        self.model = None
 
         self.fit_params = {} if fit_params is None else fit_params
 
@@ -478,30 +483,19 @@ class CovidModelFit:
     @staticmethod
     def from_db(conn, fit_id):
         df = pd.read_sql_query(f"select * from stage.covid_model_fits where id = '{fit_id}'", con=conn, coerce_float=True)
-
-        tslices = df['tslices'][0]
-        efs = df['efs'][0]
-        efs_cov = df['efs_cov'][0]
-        fit_params = df['fit_params'][0]
-
-        fit_count = len(efs_cov) if efs_cov is not None else fit_params['fit_count']
-        model = CovidModel(df['model_params'][0], tslices, ef_by_slice=efs, fit_id=fit_id, engine=conn)
-
-        fit = CovidModelFit(
-            model=model
-            , fixed_efs=efs[:-fit_count]
-            , fit_params=fit_params
-            , label=df['fit_label'][0]
-            , tags=df['tags'][0]
-        )
-        fit.fitted_efs = efs[-fit_count:]
-        fit.fitted_efs_cov = efs_cov
-        return fit
+        fit_count = len(df['efs_cov'][0]) if df['efs_cov'][0] is not None else df['fit_params'][0]['fit_count']
+        return CovidModelFit(
+            tslices=df['tslices'][0]
+            , fixed_efs=df['efs'][0][:-fit_count]
+            , fitted_efs=df['efs'][0][-fit_count:]
+            , efs_cov=df['efs_cov'][0]
+            , fit_params=df['fit_params'][0]
+            , tags=df['tags'][0])
 
     # the number of total ef values, including fixed values
     @property
     def ef_count(self):
-        return len(self.model.tslices) - 1
+        return len(self.tslices) - 1
 
     # the number of variables to be fit
     @property
@@ -509,7 +503,7 @@ class CovidModelFit:
         return self.ef_count - len(self.fixed_efs)
 
     @property
-    def best_efs(self):
+    def efs(self):
         return (list(self.fixed_efs) if self.fixed_efs is not None else []) + (list(self.fitted_efs) if self.fitted_efs is not None else [])
 
     # add a tag, to make fits easier to query
@@ -532,9 +526,12 @@ class CovidModelFit:
 
     # run an optimization to minimize the cost function using scipy.optimize.minimize()
     # method = 'curve_fit' or 'minimize'
-    def run(self, method='curve_fit'):
-        if self.model.gparams_lookup is None:
-            self.model.prep()
+    def run(self, engine, method='curve_fit', model_params='input/params.json'):
+        if self.actual_hosp is None:
+            self.actual_hosp = get_hosps(engine, self.tslices[0])
+
+        self.model = CovidModel(params=model_params, tslices=self.tslices, efs=self.fixed_efs + self.fit_params['efs0'], engine=engine)
+        self.model.prep()
 
         # run fit
         if method == 'curve_fit':
@@ -555,7 +552,7 @@ class CovidModelFit:
             print(minimization_results)
             self.fitted_efs = minimization_results.x
 
-        self.model.set_ef_by_t(self.best_efs)
+        self.model.set_ef_by_t(self.efs)
 
     # write the fit as a single row to stage.covid_model_fits, describing the optimized ef values
     def write_to_db(self, engine):
@@ -566,17 +563,17 @@ class CovidModelFit:
         if self.fit_params is not None:
             self.fit_params['fit_count'] = self.fit_count
 
-        stmt = fits_table.insert().values(tslices=[int(x) for x in self.model.tslices],
-                                    model_params=self.model.gparams,
-                                    fit_params=self.fit_params,
-                                    efs=list(self.best_efs),
-                                    observed_efs=self.model.obs_ef_by_slice,
-                                    created_at=datetime.now(),
-                                    fit_label=self.label,
-                                    tags=self.tags,
-                                    efs_cov=[list(a) for a in self.fitted_efs_cov] if self.fitted_efs_cov is not None else None)
+        stmt = fits_table.insert().values(tslices=[int(x) for x in self.tslices],
+                                          model_params=self.model.gparams if self.model is not None else None,
+                                          fit_params=self.fit_params,
+                                          efs=list(self.efs),
+                                          observed_efs=self.model.obs_ef_by_slice if self.model is not None else None,
+                                          created_at=datetime.now(),
+                                          tags=self.tags,
+                                          efs_cov=[list(a) for a in self.fitted_efs_cov] if self.fitted_efs_cov is not None else None)
 
         conn = engine.connect()
         result = conn.execute(stmt)
-        self.model.fit_id = result.inserted_primary_key[0]
+
+        return result.inserted_primary_key[0]
 

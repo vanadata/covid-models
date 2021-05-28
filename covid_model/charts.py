@@ -1,11 +1,9 @@
-from hospitalizations import get_hosps, get_deaths, get_hosps_df
+from data_imports import get_hosps, get_deaths, get_hosps_df
 from model import CovidModel, CovidModelFit
 from db import db_engine
 import scipy.stats as sps
 import matplotlib.pyplot as plt
 import copy
-from sqlalchemy import create_engine
-from sshtunnel import SSHTunnelForwarder
 
 
 def actual_hosps(engine, **plot_params):
@@ -121,7 +119,12 @@ if __name__ == '__main__':
     # total_deaths(model, c='tab:purple', label='With Under-40 Death-Rate Reduced by 20%')
 
     actual_hosps(engine)
-    uq_spaghetti(CovidModelFit.from_db(engine, 1225), sample_n=200)
+    model = CovidModel('input/params.json', [0, 600], engine=engine)
+    model.set_ef_from_db(1225)
+    model.prep()
+    model.solve_seir()
+    total_hosps(model)
+    # uq_spaghetti(CovidModelFit.from_db(engine, 1225), sample_n=200)
 
     plt.legend(loc='best')
     plt.xlabel('Days')
