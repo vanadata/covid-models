@@ -52,7 +52,7 @@ class CovidModel:
         # used to connect up with the matching fit in the database
         self.fit_id = fit_id
 
-    def prep(self, vacc_proj_scen='high-uptake'):
+    def prep(self, vacc_proj_scen='high vacc. uptake'):
         vacc_proj_params = json.load(open('input/vacc_proj_params.json'))[vacc_proj_scen]
         vacc_immun_params = json.load(open('input/vacc_immun_params.json'))
 
@@ -535,13 +535,15 @@ class CovidModelFit:
 
         # run fit
         if method == 'curve_fit':
+
             def func(trange, *efs):
                 return self.run_model_and_get_total_hosps(efs)
             self.fitted_efs, self.fitted_efs_cov = spo.curve_fit(
                 f=func
                 , xdata=self.model.trange
                 , ydata=self.actual_hosp[:len(self.model.trange)]
-                , p0=self.fit_params['efs0'])
+                , p0=self.fit_params['efs0']
+                , bounds=([self.fit_params['ef_min']] * self.fit_count, [self.fit_params['ef_max']] * self.fit_count))
         elif method == 'minimize':
             minimization_results = spo.minimize(
                 lambda x: self.cost(x)

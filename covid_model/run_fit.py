@@ -26,7 +26,7 @@ def run():
     # fetch external parameters to use for tslices and fixed efs
     fit = CovidModelFit.from_db(engine, fit_id)
     tslices = [int(x) for x in fit.tslices[:-3]]
-    tslices += list(range(tslices[-1] + 14, len(hosp_data) - 1 - 13 , 14)) + [len(hosp_data)]
+    tslices += list(range(tslices[-1] + 14, len(hosp_data) - 1 - 13, 14)) + [len(hosp_data)]
 
     fit_count = fitted_tc_count
     fixed_efs = [float(x) for x in fit.efs[:(len(tslices) - 1 - fit_count)]]
