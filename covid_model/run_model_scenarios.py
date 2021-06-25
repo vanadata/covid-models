@@ -111,36 +111,37 @@ def main():
     # prior fit
     tags = {'run_type': 'Prior', 'batch': batch}
     prior_fit_model =CovidModel(params='input/params.json', tslices=[0, tmax], engine=engine)
-    prior_fit_model.gparams.update({
-        "N": 5840795,
-        "groupN": {
-            "0-19": 1513005,
-            "20-39": 1685869,
-            "40-64": 1902963,
-            "65+": 738958
-        }})
-    prior_fit_model.gparams['variants']['b117'].update({
-        "hosp": {
-          "0-19": 1.0,
-          "20-39": 1.0,
-          "40-64": 1.40,
-          "65+": 1.40
-        },
-        "dh": {
-          "0-19": 1.0,
-          "20-39": 1.0,
-          "40-64": 1.15,
-          "65+": 1.15
-        },
-        "dnh": {
-          "0-19": 1.0,
-          "20-39": 1.0,
-          "40-64": 1.60,
-          "65+": 1.60
-        },
-        "rel_inf_prob": 1.50,
-        "pS": 1.0
-      })
+    del prior_fit_model.gparams['variants']['delta']
+    # prior_fit_model.gparams.update({
+    #     "N": 5840795,
+    #     "groupN": {
+    #         "0-19": 1513005,
+    #         "20-39": 1685869,
+    #         "40-64": 1902963,
+    #         "65+": 738958
+    #     }})
+    # prior_fit_model.gparams['variants']['b117'].update({
+    #     "hosp": {
+    #       "0-19": 1.0,
+    #       "20-39": 1.0,
+    #       "40-64": 1.40,
+    #       "65+": 1.40
+    #     },
+    #     "dh": {
+    #       "0-19": 1.0,
+    #       "20-39": 1.0,
+    #       "40-64": 1.15,
+    #       "65+": 1.15
+    #     },
+    #     "dnh": {
+    #       "0-19": 1.0,
+    #       "20-39": 1.0,
+    #       "40-64": 1.60,
+    #       "65+": 1.60
+    #     },
+    #     "rel_inf_prob": 1.50,
+    #     "pS": 1.0
+    #   })
     prior_fit_model.prep(vacc_proj_scen=primary_vacc_scen)
     run_model(prior_fit_model, prior_fit_id, fit_tags=tags)
 

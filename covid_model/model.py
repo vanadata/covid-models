@@ -235,7 +235,7 @@ class CovidModel:
         dfs = {}
         for variant, specs in variant_params.items():
             var_df = pd.read_csv(specs['theta_file_path'])  # file with at least a col "t" and a col containing variant prevalence
-            var_df = var_df.rename(columns={specs['theta_column']: variant})[['t', variant]].set_index('t').rename(columns={variant: 'e_prev'})  # get rid of all columns except t (the index) and the prev value
+            var_df = var_df.rename(columns={specs['theta_column']: variant})[['t', variant]].set_index('t').rename(columns={variant: 'e_prev'}).astype(float)  # get rid of all columns except t (the index) and the prev value
             if 't_min' in specs.keys():
                 var_df['e_prev'].loc[:specs['t_min']] = 0
             mult_df = pd.DataFrame(specs['multipliers'], index=self.groups).rename(columns={col: f'{col}_mult' for col in specs['multipliers'].keys()})
