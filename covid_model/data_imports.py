@@ -1,6 +1,9 @@
 import pandas as pd
 import numpy as np
 import datetime as dt
+import scipy.integrate as spi
+import scipy.optimize as spo
+import matplotlib.pyplot as plt
 from db import db_engine
 
 
@@ -14,6 +17,17 @@ def get_hosps(engine, min_date=dt.datetime(2020, 1, 24)):
 
 def get_hosps_df(engine):
     return pd.read_sql('select * from cdphe.emresource_hospitalizations', engine).set_index('measure_date')['currently_hospitalized']
+
+
+def get_hosps_by_age(engine, fname):
+    df = pd.read_csv(fname, parse_dates=['dates']).set_index('dates')
+    df = df[[col for col in df.columns if col[:17] == 'HospCOVIDPatients']]
+    df = df.rename(columns={col: col.replace('HospCOVIDPatients', '').replace('to', '-').replace('plus', '+') for col in df.columns})
+    df = df.stack()
+    df.index = df.index.set_names(['measure_date', 'group'])
+    cophs_total = df.groupby('measure_date').sum()
+    emr_total = get_hosps_df(engine)
+    return df * emr_total / cophs_total
 
 
 # load actual death data for plotting
@@ -31,6 +45,17 @@ def get_deaths(engine, min_date=dt.datetime(2020, 1, 24)):
     df['cumu_deaths'] = df['new_deaths'].cumsum()
 
     return df
+
+
+def get_deaths_by_age(fname):
+    raw = pd.read_csv(fname, parse_dates=['deathdate']).set_index('deathdate')
+    df = pd.DataFrame(index=raw.index)
+    for i, g in enumerate(['0-19', '20-39', '40-64', '65+']):
+        df[g] = raw[f'agedeaths{i+1}'].str.replace('.', '0').astype(int)
+    df = df.stack()
+    df.index = df.index.set_names(['measure_date', 'group'])
+    return df
+
 
 
 def get_vaccinations(engine, from_date=None, proj_to_date=None, proj_lookback=7, proj_fixed_rates=None, max_cumu=None, max_rate_per_remaining=1.0, realloc_priority=None):
@@ -98,6 +123,7 @@ def get_vaccinations_by_county(engine):
         , g.age_group
         , coalesce(sum(total_count) filter (where date_type like 'vaccine dose 1/%'), 0)::int as first_doses_given
         , coalesce(sum(total_count) filter (where date_type = 'vaccine dose 1/2'), 0)::int as mrna_first_doses_given
+        , coalesce(sum(total_count) filter (where date_type = 'vaccine dose 2/2'), 0)::int as mrna_second_doses_given
         , coalesce(sum(total_count) filter (where date_type = 'vaccine dose 1/1'), 0)::int  as jnj_doses_given
     from generate_series('2020-12-01'::date, (select max(reporting_date) from cdphe.covid19_county_summary where date_type like 'vaccine dose 1/%'), interval '1 day') as dd (measure_date)
     cross join geo_dev.us_counties c
@@ -111,13 +137,79 @@ def get_vaccinations_by_county(engine):
     return df
 
 
+def get_variant_prevalence(fname):
+    actual_variant_prev = pd.read_csv(fname, parse_dates=['date'])
+    actual_variant_prev['t'] = (actual_variant_prev['date'] - actual_variant_prev['date'].min()).astype('timedelta64[D]').astype(int)
+    actual_variant_prev = actual_variant_prev.drop(columns=['date']).set_index('t')
+
+    t0s = [0, 0, 2*7, 18*7]
+    def solve_ode(params):
+        # t0s = params[:4]
+        # growth_rates = params[4:]
+        growth_rates = params
+        def variant_growth(t, y):
+            naive_growth_y = []
+            # print(list(zip(y, t0s, growth_rates)))
+            for prevalence, t0, rate in zip(y, t0s, growth_rates):
+                if prevalence <= 0.01 and t >= t0:
+                    naive_growth_y.append(0.01 * (1.0+rate))
+                else:
+                    # if rate == 0.9:
+                    #     print('\n', t, rate)
+                    #     print(prevalence)
+                    #     print(prevalence * (1.0 + rate))
+                    naive_growth_y.append(prevalence * (1.0 + rate))
+            # print(t)
+            # print(y)
+            #
+            # print(dy)
+            dy = np.array(naive_growth_y) / sum(naive_growth_y) - y
+            return dy
+
+        solution = spi.solve_ivp(variant_growth,
+                          t_span=(actual_variant_prev.index.min(), actual_variant_prev.index.max()),
+                          y0=[1, 0, 0, 0],
+                          t_eval=actual_variant_prev.index.values, method='LSODA')
+
+        # print(solution.y.flatten())
+        return solution.y
+
+    # params, cov = spo.curve_fit(solve_ode,
+    #               xdata=actual_variant_prev.index.values,
+    #               ydata=actual_variant_prev.values.T,
+    #               p0=[actual_variant_prev.index.min()] * 4 + [1.0] * 4,
+    #               bounds=([actual_variant_prev.index.min()] * 4 + [1.0] * 4,
+    #                       [actual_variant_prev.index.max()] * 4 + [3.0] * 4)
+    # )
+
+
+    # results = spo.least_squares(lambda params: solve_ode(params).flatten() - actual_variant_prev.T.to_numpy().flatten(),
+    #                   x0=[0, 0, 2*7, 18*7] + [0.05] * 4,
+    #                   bounds=([0, 0, 2*7, 18*7] + [0.0] * 4,
+    #                           [0+1, 0+1, 2*7+1, 18*7+1] + [0.1] * 4))
+
+    results = spo.least_squares(lambda params: solve_ode(params).flatten() - actual_variant_prev.T.to_numpy().flatten(),
+                      x0=[0.2] * 4,
+                      bounds=([0.0] * 4, [1] * 4))
+
+    print(actual_variant_prev.T.to_numpy()[3][-6:])
+
+    # print(results)
+    # print(results.cost)
+    # print(results.x)
+    print([round(x, 7) for x in solve_ode(results.x)[0]][-6:])
+    print([round(x, 7) for x in solve_ode(results.x)[1]][-6:])
+    print([round(x, 7) for x in solve_ode(results.x)[2]][-6:])
+    print([round(x, 7) for x in solve_ode(results.x)[3]][-6:])
+    # print([round(x, 7) for x in solve_ode([0, 0.019, 0.005, 0.9])[3]][-6:])
+
+    print('\n', results.x)
+    print(results.cost)
+
+    actual_variant_prev.plot()
+    pd.DataFrame(solve_ode(results.x).T).plot()
+    plt.show()
+
+
 if __name__ == '__main__':
-    engine = db_engine()
-
-    hosps = pd.DataFrame(get_hosps_df(engine)).reset_index().rename(columns={'currently_hospitalized': 'Iht', 'measure_date': 'date'})
-    hosps['time'] = ((pd.to_datetime(hosps['date']) - dt.datetime(2020, 1, 24)) / np.timedelta64(1, 'D')).astype(int)
-    hosps[['time', 'date', 'Iht']].to_csv('output/CO_EMR_Hosp.csv', index=False)
-
-    vacc_by_county = get_vaccinations_by_county(engine)
-    vacc_by_county.to_csv('output/daily_vaccination_by_age_by_county.csv', index=False)
-
+    get_variant_prevalence('input/variant_prevalence.csv')

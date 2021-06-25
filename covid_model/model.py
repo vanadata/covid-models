@@ -52,7 +52,7 @@ class CovidModel:
         # used to connect up with the matching fit in the database
         self.fit_id = fit_id
 
-    def prep(self, vacc_proj_scen='high-uptake'):
+    def prep(self, vacc_proj_scen='high vacc. uptake'):
         vacc_proj_params = json.load(open('input/vacc_proj_params.json'))[vacc_proj_scen]
         vacc_immun_params = json.load(open('input/vacc_immun_params.json'))
 
@@ -235,7 +235,7 @@ class CovidModel:
         dfs = {}
         for variant, specs in variant_params.items():
             var_df = pd.read_csv(specs['theta_file_path'])  # file with at least a col "t" and a col containing variant prevalence
-            var_df = var_df.rename(columns={specs['theta_column']: variant})[['t', variant]].set_index('t').rename(columns={variant: 'e_prev'})  # get rid of all columns except t (the index) and the prev value
+            var_df = var_df.rename(columns={specs['theta_column']: variant})[['t', variant]].set_index('t').rename(columns={variant: 'e_prev'}).astype(float)  # get rid of all columns except t (the index) and the prev value
             if 't_min' in specs.keys():
                 var_df['e_prev'].loc[:specs['t_min']] = 0
             mult_df = pd.DataFrame(specs['multipliers'], index=self.groups).rename(columns={col: f'{col}_mult' for col in specs['multipliers'].keys()})
@@ -535,13 +535,15 @@ class CovidModelFit:
 
         # run fit
         if method == 'curve_fit':
+
             def func(trange, *efs):
                 return self.run_model_and_get_total_hosps(efs)
             self.fitted_efs, self.fitted_efs_cov = spo.curve_fit(
                 f=func
                 , xdata=self.model.trange
                 , ydata=self.actual_hosp[:len(self.model.trange)]
-                , p0=self.fit_params['efs0'])
+                , p0=self.fit_params['efs0']
+                , bounds=([self.fit_params['ef_min']] * self.fit_count, [self.fit_params['ef_max']] * self.fit_count))
         elif method == 'minimize':
             minimization_results = spo.minimize(
                 lambda x: self.cost(x)

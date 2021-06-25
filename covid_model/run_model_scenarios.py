@@ -1,7 +1,9 @@
-from model import CovidModel, CovidModelFit
+from model import CovidModel
 from db import db_engine
 import datetime as dt
 import pandas as pd
+import json
+import argparse
 
 
 def build_legacy_output_df(model: CovidModel):
@@ -54,27 +56,35 @@ def tags_to_scen_label(tags):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-cf", "--current_fit_id", type=int, help="The current fit ID (run today)")
+    parser.add_argument("-pf", "--prior_fit_id", type=int, help="The prior fit ID (run last week)")
+    parser.add_argument("-d", "--days", type=int, help="Number of days to include in these scenarios, starting from Jan 24, 2020")
+    parser.add_argument("-tcs", "--tc_shifts", nargs='+', type=float, help="Upcoming shifts in TC to simulate (-0.05 represents a 5% reduction in TC)")
+    # parser.add_argument("-pvs", "--primary_vaccine_scen", choices=['high', 'low'], type=float, help="The name of the vaccine scenario to be used for the default model scenario.")
+    run_params = parser.parse_args()
+
     engine = db_engine()
 
-    # get prior and current fits
-    tmax = 600
-    current_fit_id = 1318
-    prior_fit_id = 1225
-    engine = db_engine()
-    tc_shifts = [-0.07, -0.14]
-    tc_shift_dates = [dt.datetime(2021, 6, 4), dt.datetime(2021, 6, 18), dt.datetime(2021, 7, 2)]
+    # set various parameters
+    tmax = run_params.days if run_params.days is not None else 700
+    primary_vacc_scen = 'high vacc. uptake'
+    current_fit_id = run_params.current_fit_id if run_params.current_fit_id is not None else 1824
+    prior_fit_id = run_params.current_fit_id if run_params.current_fit_id is not None else 1516
+    tc_shifts = run_params.tc_shifts if run_params.tc_shifts is not None else [-0.07, -0.14]
+    next_friday = dt.date.today() + dt.timedelta((4-dt.date.today().weekday()) % 7)
+    tc_shift_dates = [next_friday, next_friday + dt.timedelta(days=14), next_friday + dt.timedelta(days=28)]
+    tc_shift_dates = [dt.datetime.combine(d, dt.datetime.min.time()) for d in tc_shift_dates]
     batch = 'standard_' + dt.datetime.now().strftime('%Y%m%d_%H%M%S')
 
     # create models for low- and high-vaccine-uptake scenarios
-    print('Building high-uptake vaccine projection...')
-    hvu_model = CovidModel(params='input/params.json', tslices=[0, tmax], engine=engine)
-    hvu_model.prep(vacc_proj_scen='high-uptake')
-    hvu_model.write_vacc_to_csv('output/daily_vaccination_rates.csv')
-    print('Building low-uptake vaccine projection...')
-    lvu_model = CovidModel(params='input/params.json', tslices=[0, tmax], engine=engine)
-    lvu_model.prep(vacc_proj_scen='low-uptake')
-    lvu_model.write_vacc_to_csv('output/daily_vaccination_rates_with_lower_vacc_cap.csv')
-    vacc_scens = {'high-uptake': hvu_model, 'low-uptake': lvu_model}
+    vacc_projection_params = json.load(open('input/vacc_proj_params.json'))
+    models_by_vacc_scen = {}
+    for vacc_scen, proj_params in vacc_projection_params.items():
+        print(f'Building {vacc_scen} projection...')
+        models_by_vacc_scen[vacc_scen] = CovidModel(params='input/params.json', tslices=[0, tmax], engine=engine)
+        models_by_vacc_scen[vacc_scen].prep(vacc_proj_scen=vacc_scen)
+        models_by_vacc_scen[vacc_scen].write_vacc_to_csv(f'output/daily_vaccination_rates{"_with_lower_vacc_cap" if vacc_scen == "low vacc. uptake" else ""}.csv')
 
     # run model scenarios
     print('Running scenarios...')
@@ -92,28 +102,61 @@ def main():
 
     # current fit
     tags = {'run_type': 'Current', 'batch': batch}
-    run_model(hvu_model, current_fit_id, fit_tags=tags)
+    run_model(models_by_vacc_scen[primary_vacc_scen], current_fit_id, fit_tags=tags)
     # output this one to it's own file
-    build_legacy_output_df(hvu_model).to_csv('output/out2.csv')
+    build_legacy_output_df(models_by_vacc_scen[primary_vacc_scen]).to_csv('output/out2.csv')
     # and output the TCs to their own file
-    build_tc_df(hvu_model).to_csv('output/tc_over_time.csv', index=False)
+    build_tc_df(models_by_vacc_scen[primary_vacc_scen]).to_csv('output/tc_over_time.csv', index=False)
 
     # prior fit
     tags = {'run_type': 'Prior', 'batch': batch}
-    run_model(hvu_model, prior_fit_id, fit_tags=tags)
+    prior_fit_model =CovidModel(params='input/params.json', tslices=[0, tmax], engine=engine)
+    del prior_fit_model.gparams['variants']['delta']
+    # prior_fit_model.gparams.update({
+    #     "N": 5840795,
+    #     "groupN": {
+    #         "0-19": 1513005,
+    #         "20-39": 1685869,
+    #         "40-64": 1902963,
+    #         "65+": 738958
+    #     }})
+    # prior_fit_model.gparams['variants']['b117'].update({
+    #     "hosp": {
+    #       "0-19": 1.0,
+    #       "20-39": 1.0,
+    #       "40-64": 1.40,
+    #       "65+": 1.40
+    #     },
+    #     "dh": {
+    #       "0-19": 1.0,
+    #       "20-39": 1.0,
+    #       "40-64": 1.15,
+    #       "65+": 1.15
+    #     },
+    #     "dnh": {
+    #       "0-19": 1.0,
+    #       "20-39": 1.0,
+    #       "40-64": 1.60,
+    #       "65+": 1.60
+    #     },
+    #     "rel_inf_prob": 1.50,
+    #     "pS": 1.0
+    #   })
+    prior_fit_model.prep(vacc_proj_scen=primary_vacc_scen)
+    run_model(prior_fit_model, prior_fit_id, fit_tags=tags)
 
     # vacc cap scenarios
-    for vacc_scen, model_w_vacc_scen in vacc_scens.items():
+    for vacc_scen in models_by_vacc_scen.keys():
         tags = {'run_type': 'Vaccination Scenario', 'batch': batch, 'vacc_cap': vacc_scen}
-        run_model(model_w_vacc_scen, current_fit_id, fit_tags=tags)
+        run_model(models_by_vacc_scen[vacc_scen], current_fit_id, fit_tags=tags)
 
     # tc shift scenarios
     for tcs in tc_shifts:
         for tcsd in tc_shift_dates:
-            for vacc_scen, model_w_vacc_scen in vacc_scens.items():
+            for vacc_scen in models_by_vacc_scen.keys():
                 tags = {'run_type': 'TC Shift Projection', 'batch': batch, 'tc_shift': f'{int(100 * tcs)}%',
                         'tc_shift_date': tcsd.strftime('%b %#d'), 'vacc_cap': vacc_scen}
-                run_model(model_w_vacc_scen, current_fit_id, tc_shift=tcs, tc_shift_date=tcsd, fit_tags=tags)
+                run_model(models_by_vacc_scen[vacc_scen], current_fit_id, tc_shift=tcs, tc_shift_date=tcsd, fit_tags=tags)
 
     df = pd.concat(legacy_outputs)
     df.index.names = ['scenario', 'time']
