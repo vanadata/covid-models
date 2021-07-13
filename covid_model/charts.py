@@ -50,12 +50,24 @@ def total_hosps(model, group=None, **plot_params):
     plt.plot(model.daterange, hosps, **{'c': 'blue', 'label': 'Modeled Hosps.', **plot_params})
 
 
-def modeled_by_group(model, axs, compartment='Ih', **plot_params):
+def modeled(model, compartments, transform=lambda x: x, **plot_params):
+    plt.plot(model.daterange, transform(model.solution_ydf_summed[compartments].sum(axis=1)), **plot_params)
+
+
+def modeled_by_group(model, axs, compartments=['Ih'], **plot_params):
     for g, ax in zip(model.groups, axs.flat):
-        ax.plot(model.daterange, model.solution_ydf.xs(g, level='group')[compartment], **{'c': 'blue', 'label': 'Modeled', **plot_params})
+        ax.plot(model.daterange, model.solution_ydf.xs(g, level='group')[compartments].sum(axis=1), **{'c': 'blue', 'label': 'Modeled', **plot_params})
         ax.set_title(g)
         ax.legend(loc='best')
         ax.set_xlabel('')
+
+
+def transmission_control(model, **plot_params):
+    plt.plot(model.tslices[:-1], model.efs, **plot_params)
+
+
+def re_estimates(model, **plot_params):
+    plt.plot(model.daterange, model.re_estimates, **plot_params)
 
 
 def new_deaths_by_group(model, axs, **plot_params):
@@ -100,19 +112,20 @@ def uq_spaghetti(fit, sample_n=100, tmax=600, **plot_params):
     samples = fitted_efs_dist.rvs(sample_n)
 
     # for each sample, solve the model and add a line to the plot
-    model = copy.copy(fit.model)
+    model = CovidModel('input/params.json', fit.tslices, engine=engine)
     model.add_tslice(tmax, 0)
     model.prep()
-    for sample_fitted_efs in samples:
+    for i, sample_fitted_efs in enumerate(samples):
+        print(i)
         model.set_ef_by_t(list(fit.fixed_efs) + list(sample_fitted_efs) + [sample_fitted_efs[-1]])
         model.solve_seir()
-        plt.plot(model.daterange, model.total_hosps(), **{'color': 'darkblue', 'alpha': 0.03, **plot_params})
+        plt.plot(model.daterange, model.total_hosps(), **{'color': 'darkblue', 'alpha': 0.025, **plot_params})
 
 
 if __name__ == '__main__':
     engine = db_engine()
 
-    model = CovidModel(params='input/params.json', tslices=[0, 700], engine=engine)
+    # model = CovidModel(params='input/params.json', tslices=[0, 700], engine=engine)
     # model.gparams.update({
     #   "N": 5840795,
     #   "groupN": {
@@ -127,14 +140,14 @@ if __name__ == '__main__':
     # model.efs[9] -= 0.07
     # model.efs[10] += 0.07
     # model.efs[11] += 0.01
-    model.set_ef_by_t(model.efs)
-    model.prep()
-    model.solve_seir()
-    actual_hosps(engine)
-    total_hosps(model)
+    # model.set_ef_by_t(model.efs)
+    # model.prep()
+    # model.solve_seir()
+    # actual_hosps(engine)
+    # total_hosps(model)
     # actual_vs_modeled_hosps_by_group('input/hosps_by_group_20210611.csv', model)
     # actual_vs_modeled_deaths_by_group('input/deaths_by_group_20210614.csv', model)
-    plt.show()
+    # plt.show()
 
     # fig, axs = plt.subplots(2, 2)
     # actual_deaths_by_group('input/deaths_by_group_20210614.csv', axs=axs)
@@ -200,12 +213,35 @@ if __name__ == '__main__':
     # total_deaths(model, c='tab:purple', label='With Under-40 Death-Rate Reduced by 20%')
 
     # actual_hosps(engine)
-    # model = CovidModel('input/params.json', [0, 600], engine=engine)
-    # model.set_ef_from_db(1225)
-    # model.prep()
+    # model = CovidModel('input/params.json', [0, 700], engine=engine)
+    # model.set_ef_from_db(1992)
+    # model.prep(vacc_proj_scen='current trajectory')
     # model.solve_seir()
     # total_hosps(model)
-    # uq_spaghetti(CovidModelFit.from_db(engine, 1225), sample_n=200)
+    # uq_spaghetti(CovidModelFit.from_db(engine, 2330), sample_n=200, tmax=600)
+    # uq_spaghetti(CovidModelFit.from_db(engine, 1992), sample_n=200, tmax=600)
+
+    # actual_hosps(engine, color='black')
+    # fig, axs = plt.subplots(2, 2)
+
+    fits = {'6-12 mo. immunity': 2470, '12-24 mo. immunity': 2467, 'indefinite immunity': 2502}
+    colors = ['r', 'b', 'g', 'black', 'orange', 'pink']
+    for i, (label, fit_id) in enumerate(fits.items()):
+        fit1 = CovidModelFit.from_db(conn=engine, fit_id=fit_id)
+        model1 = CovidModel(fit1.model_params, [0, 600], engine=engine)
+        model1.set_ef_from_db(fit_id)
+        model1.prep()
+        model1.solve_seir()
+        # modeled(model1, compartments=['E'], transform=lambda x: x.cumsum()/4.0, c=colors[i], label=label)
+        # modeled(model1, compartments=['V', 'Vxd'], transform=lambda x: x/5813208.0, c=colors[i], label=label)
+        modeled(model1, compartments=['I', 'A'], c=colors[i], label=label)
+        # transmission_control(model1, c=colors[i], label=label)
+        # re_estimates(model1, c=colors[i], label=label)
+        # modeled_by_group(model1, axs=axs, compartments=['I', 'A'], c=colors[i], label=label)
+
+    plt.legend(loc='best')
+    plt.ylabel('People Infected')
+    plt.show()
 
     # plt.legend(loc='best')
     # plt.xlabel('Days')

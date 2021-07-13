@@ -1,13 +1,31 @@
 {
-  "high vacc. uptake": {
+  "slow-down": {
       "lookback": 7,
-      "max_cumu": {"0-19": 0.3413, "20-39": 0.80, "40-64": 0.80, "65+": 0.82},
+        "max_cumu": {"0-19": 0.195, "20-39": 0.57, "40-64": 0.68, "65+": 0.81},
       "max_rate_per_remaining": 0.04,
       "realloc_priority": null
   },
-  "low vacc. uptake": {
+  "current trajectory": {
       "lookback": 7,
-      "max_cumu": {"0-19": 0.239, "20-39": 0.56, "40-64": 0.68, "65+": 0.82},
+      "max_cumu": {"0-19": 0.213, "20-39": 0.58, "40-64": 0.70, "65+": 0.82},
+      "max_rate_per_remaining": 0.04,
+      "realloc_priority": null
+  },
+  "push for 80% adults": {
+      "lookback": 7,
+      "max_cumu": {"0-19": 0.195, "20-39": 0.80, "40-64": 0.82, "65+": 0.85},
+      "max_rate_per_remaining": 0.04,
+      "realloc_priority": null
+  },
+  "push for 70% under-18": {
+      "lookback": 7,
+      "max_cumu": {"0-19": 0.318, "20-39": 0.57, "40-64": 0.68, "65+": 0.81},
+      "max_rate_per_remaining": 0.04,
+      "realloc_priority": null
+  },
+  "push for 80% adults, 70% under-18": {
+      "lookback": 7,
+      "max_cumu": {"0-19": 0.318, "20-39": 0.80, "40-64": 0.82, "65+": 0.85},
       "max_rate_per_remaining": 0.04,
       "realloc_priority": null
   }
