@@ -51,10 +51,12 @@ def total_hosps(model, group=None, **plot_params):
 
 
 def modeled(model, compartments, transform=lambda x: x, **plot_params):
+    if type(compartments) == 'str':
+        compartments = [compartments]
     plt.plot(model.daterange, transform(model.solution_ydf_summed[compartments].sum(axis=1)), **plot_params)
 
 
-def modeled_by_group(model, axs, compartments=['Ih'], **plot_params):
+def modeled_by_group(model, axs, compartments='Ih', **plot_params):
     for g, ax in zip(model.groups, axs.flat):
         ax.plot(model.daterange, model.solution_ydf.xs(g, level='group')[compartments].sum(axis=1), **{'c': 'blue', 'label': 'Modeled', **plot_params})
         ax.set_title(g)

@@ -83,10 +83,14 @@ def main():
     # create models for low- and high-vaccine-uptake scenarios
     vacc_projection_params = json.load(open('input/vacc_proj_params.json'))
     models_by_vacc_scen = {}
+    models_with_increased_under20_inf_prob = {}
     for vacc_scen, proj_params in vacc_projection_params.items():
         print(f'Building {vacc_scen} projection...')
         models_by_vacc_scen[vacc_scen] = CovidModel(params='input/params.json', tslices=[0, tmax], engine=engine)
         models_by_vacc_scen[vacc_scen].prep(vacc_proj_scen=vacc_scen)
+        models_with_increased_under20_inf_prob[vacc_scen] = CovidModel(params='input/params.json', tslices=[0, tmax], engine=engine)
+        models_with_increased_under20_inf_prob[vacc_scen].gparams['rel_inf_prob'] = {'tslices': [569], 'value': {'0-19': [1.0, 1.83], '20-39': [1.0, 1.0], '40-64': [1.0, 1.0], '65+': [1.0, 1.0]}}
+        models_with_increased_under20_inf_prob[vacc_scen].prep(vacc_proj_scen=vacc_scen)
         # models_by_vacc_scen[vacc_scen].write_vacc_to_csv(f'output/daily_vaccination_rates{"_with_lower_vacc_cap" if vacc_scen == "low vacc. uptake" else ""}.csv')
 
     # run model scenarios
@@ -102,7 +106,7 @@ def main():
                 model.add_tslice((tc_shift_date - dt.datetime(2020, 1, 24)).days, current_ef + tc_shift)
             else:
                 for i, tc_shift_for_this_day in enumerate(np.linspace(0, tc_shift, tc_shift_days)):
-                    model.add_tslice((tc_shift_date - dt.datetime(2020, 1, 24)).days + 1, current_ef + tc_shift_for_this_day)
+                    model.add_tslice((tc_shift_date - dt.datetime(2020, 1, 24)).days + i, current_ef + tc_shift_for_this_day)
 
         model.solve_seir()
         model.write_to_db(tags=fit_tags, new_fit=True)
@@ -138,8 +142,9 @@ def main():
         for tcsd in tc_shift_dates:
             for vacc_scen in models_by_vacc_scen.keys():
                 tags = {'run_type': 'TC Shift Projection', 'batch': batch, 'tc_shift': f'{int(100 * tcs)}%',
-                        'tc_shift_date': tcsd.strftime('%b %#d'), 'vacc_cap': vacc_scen}
+                        'tc_shift_date': f'{tcsd.strftime("%b %#d")} - {(tcsd + dt.timedelta(days=tc_shift_days)).strftime("%b %#d")}', 'vacc_cap': vacc_scen}
                 run_model(models_by_vacc_scen[vacc_scen], current_fit_id, tc_shift=tcs, tc_shift_date=tcsd, fit_tags=tags)
+                run_model(models_with_increased_under20_inf_prob[vacc_scen], current_fit_id, tc_shift=tcs, tc_shift_date=tcsd, fit_tags={**tags, **{'tc_shift': tags['tc_shift'] + '; school-effect'}})
 
     df = pd.concat(legacy_outputs)
     df.index.names = ['scenario', 'time']

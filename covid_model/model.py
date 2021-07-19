@@ -3,6 +3,7 @@ import math
 import datetime as dt
 import scipy.integrate as spi
 import scipy.optimize as spo
+import pyswarms as ps
 from sqlalchemy import MetaData
 from datetime import datetime
 import itertools
@@ -20,17 +21,6 @@ class CovidModel:
         ('i', 'h', 'hosp'),
         ('i', 'd', 'dnh'),
         ('h', 'd', 'dh')]
-
-    # groups representing four different age groups
-    # groups = {
-    #         'infection': ['S', 'E', 'I', 'Ih', 'R', 'D'],
-    #         'symptom': ['A', 'Y'],
-    #         'age': ['0-19', '20-39', '40-64', '65+'],
-    #         'vacc': ['none', ('mrna', 1), ('mrna', 2), ('jnj', 1), ('jnj', 2)],
-    #         'variant': ['none', 'b117', 'cali', 'delta']
-    # }
-    # d = {}
-    # d[{'age': '65+', 'vacc': None}] = 0.1
 
     groups = ['0-19', '20-39', '40-64', '65+']
 
@@ -186,10 +176,10 @@ class CovidModel:
         self.vacc_rate_df = get_vaccinations(self.engine
                              , from_date=self.datemin
                              , proj_to_date=self.daterange.max()
-                             , proj_lookback=7
+                             , proj_lookback=proj_params['lookback']
                              , proj_fixed_rates=proj_params['fixed_rates'] if 'fixed_rates' in proj_params.keys() else None
                              , max_cumu={g: self.gparams['groupN'][g] * proj_params['max_cumu'][g] for g in self.groups}
-                             , max_rate_per_remaining=0.04
+                             , max_rate_per_remaining=proj_params['max_rate_per_remaining']
                              , realloc_priority=None)
 
         self.vacc_rate_df.index = self.vacc_rate_df.index.set_levels((self.vacc_rate_df.index.unique(0) - self.datemin).days, level=0).set_names('t', level=0)
@@ -401,8 +391,8 @@ class CovidModel:
 
         # build dy
         dy = []
-        transm = CovidModel.daily_transmission_per_susc(ef, I_total=ydf['I'].sum(), A_total=ydf['A'].sum(), **params[None])
         for group in self.groups:
+            transm = CovidModel.daily_transmission_per_susc(ef, I_total=ydf['I'].sum(), A_total=ydf['A'].sum(), **params[group])
             dy += CovidModel.single_group_seir(
                 single_group_y=list(ydf.loc[group, :]),
                 transm_per_susc=transm,
@@ -559,6 +549,10 @@ class CovidModelFit:
         c = sum(e**2 for e in res)
         return c
 
+    # the cost function to be used for the particle swarm
+    def ps_cost(self, xs):
+        return sum(self.cost(x) for x in xs)
+
     # run an optimization to minimize the cost function using scipy.optimize.minimize()
     # method = 'curve_fit' or 'minimize'
     def run(self, engine, method='curve_fit', model_params='input/params.json'):
@@ -570,7 +564,6 @@ class CovidModelFit:
 
         # run fit
         if method == 'curve_fit':
-
             def func(trange, *efs):
                 return self.run_model_and_get_total_hosps(efs)
             self.fitted_efs, self.fitted_efs_cov = spo.curve_fit(
@@ -588,6 +581,12 @@ class CovidModelFit:
                 , options=self.fit_params)
             print(minimization_results)
             self.fitted_efs = minimization_results.x
+        elif method == 'pswarm':
+            options = {'c1': 0.5, 'c2': 0.3, 'w': 0.9}
+            bounds = ([self.fit_params['ef_min']] * self.fit_count, [self.fit_params['ef_max']] * self.fit_count)
+            optimizer = ps.single.GlobalBestPSO(n_particles=self.fit_count * 2, dimensions=self.fit_count, bounds=bounds, options=options)
+            cost, self.fitted_efs = optimizer.optimize(self.ps_cost, iters=10)
+            print(self.fitted_efs)
 
         self.model.set_ef_by_t(self.efs)
 
