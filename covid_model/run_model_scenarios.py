@@ -2,6 +2,7 @@ from model import CovidModel
 from db import db_engine
 import datetime as dt
 import pandas as pd
+import numpy as np
 import json
 import argparse
 
@@ -20,12 +21,12 @@ def build_legacy_output_df(model: CovidModel):
     df['Itotal'] = totals['I'] + totals['A']
     df['Etotal'] = totals['E']
     df['Einc'] = df['Etotal'] / model.gparams['alpha']
-    df['Vt'] = totals['V']
+    df['Vt'] = totals['V'] + totals['Vxd']
     # for i, group in enumerate(model.groups):
     #     group_df = ydf.xs(group, level='group')
     #     df[f'vacel{i}'] = (group_df['S'] + group_df['R'] + group_df['A']) / (model.gparams['groupN'][group] - (group_df['V'] + group_df['Ih'] + group_df['D']))
-    df['immune'] = totals['R'] + totals['RA'] + totals['V']
-    df['immune4'] = ydf.xs('65+', level='group')['V'] + ydf.xs('65+', level='group')['R']
+    df['immune'] = totals['R'] + totals['RA'] + totals['V'] + totals['Vxd']
+    df['immune4'] = ydf.xs('65+', level='group')['R'] + ydf.xs('65+', level='group')['RA'] + ydf.xs('65+', level='group')['V'] + ydf.xs('65+', level='group')['Vxd']
     df['date'] = model.daterange
     df['Ilag'] = totals['I'].shift(3)
     df['Re'] = model.re_estimates
@@ -68,23 +69,29 @@ def main():
 
     # set various parameters
     tmax = run_params.days if run_params.days is not None else 700
-    primary_vacc_scen = 'high vacc. uptake'
+    primary_vacc_scen = 'current trajectory'
     current_fit_id = run_params.current_fit_id if run_params.current_fit_id is not None else 1824
-    prior_fit_id = run_params.current_fit_id if run_params.current_fit_id is not None else 1516
+    prior_fit_id = run_params.prior_fit_id if run_params.prior_fit_id is not None else 1516
     tc_shifts = run_params.tc_shifts if run_params.tc_shifts is not None else [-0.07, -0.14]
     next_friday = dt.date.today() + dt.timedelta((4-dt.date.today().weekday()) % 7)
-    tc_shift_dates = [next_friday, next_friday + dt.timedelta(days=14), next_friday + dt.timedelta(days=28)]
+    # tc_shift_dates = [next_friday, next_friday + dt.timedelta(days=14), next_friday + dt.timedelta(days=28), dt.datetime(2021, 8, 15)]
+    tc_shift_dates = [next_friday]
     tc_shift_dates = [dt.datetime.combine(d, dt.datetime.min.time()) for d in tc_shift_dates]
+    tc_shift_days = 70
     batch = 'standard_' + dt.datetime.now().strftime('%Y%m%d_%H%M%S')
 
     # create models for low- and high-vaccine-uptake scenarios
     vacc_projection_params = json.load(open('input/vacc_proj_params.json'))
     models_by_vacc_scen = {}
+    models_with_increased_under20_inf_prob = {}
     for vacc_scen, proj_params in vacc_projection_params.items():
         print(f'Building {vacc_scen} projection...')
         models_by_vacc_scen[vacc_scen] = CovidModel(params='input/params.json', tslices=[0, tmax], engine=engine)
         models_by_vacc_scen[vacc_scen].prep(vacc_proj_scen=vacc_scen)
-        models_by_vacc_scen[vacc_scen].write_vacc_to_csv(f'output/daily_vaccination_rates{"_with_lower_vacc_cap" if vacc_scen == "low vacc. uptake" else ""}.csv')
+        models_with_increased_under20_inf_prob[vacc_scen] = CovidModel(params='input/params.json', tslices=[0, tmax], engine=engine)
+        models_with_increased_under20_inf_prob[vacc_scen].gparams['rel_inf_prob'] = {'tslices': [569], 'value': {'0-19': [1.0, 1.83], '20-39': [1.0, 1.0], '40-64': [1.0, 1.0], '65+': [1.0, 1.0]}}
+        models_with_increased_under20_inf_prob[vacc_scen].prep(vacc_proj_scen=vacc_scen)
+        # models_by_vacc_scen[vacc_scen].write_vacc_to_csv(f'output/daily_vaccination_rates{"_with_lower_vacc_cap" if vacc_scen == "low vacc. uptake" else ""}.csv')
 
     # run model scenarios
     print('Running scenarios...')
@@ -93,8 +100,14 @@ def main():
     def run_model(model, fit_id, fit_tags=None, tc_shift=None, tc_shift_date=None):
         print('Scenario tags: ', fit_tags)
         model.set_ef_from_db(fit_id)
+        current_ef = model.efs[-1]
         if tc_shift is not None:
-            model.add_tslice((tc_shift_date - dt.datetime(2020, 1, 24)).days, model.efs[-1] + tc_shift)
+            if tc_shift_days is None:
+                model.add_tslice((tc_shift_date - dt.datetime(2020, 1, 24)).days, current_ef + tc_shift)
+            else:
+                for i, tc_shift_for_this_day in enumerate(np.linspace(0, tc_shift, tc_shift_days)):
+                    model.add_tslice((tc_shift_date - dt.datetime(2020, 1, 24)).days + i, current_ef + tc_shift_for_this_day)
+
         model.solve_seir()
         model.write_to_db(tags=fit_tags, new_fit=True)
         legacy_outputs[tags_to_scen_label(fit_tags)] = build_legacy_output_df(model)
@@ -110,38 +123,12 @@ def main():
 
     # prior fit
     tags = {'run_type': 'Prior', 'batch': batch}
-    prior_fit_model =CovidModel(params='input/params.json', tslices=[0, tmax], engine=engine)
-    del prior_fit_model.gparams['variants']['delta']
-    # prior_fit_model.gparams.update({
-    #     "N": 5840795,
-    #     "groupN": {
-    #         "0-19": 1513005,
-    #         "20-39": 1685869,
-    #         "40-64": 1902963,
-    #         "65+": 738958
-    #     }})
-    # prior_fit_model.gparams['variants']['b117'].update({
-    #     "hosp": {
-    #       "0-19": 1.0,
-    #       "20-39": 1.0,
-    #       "40-64": 1.40,
-    #       "65+": 1.40
-    #     },
-    #     "dh": {
-    #       "0-19": 1.0,
-    #       "20-39": 1.0,
-    #       "40-64": 1.15,
-    #       "65+": 1.15
-    #     },
-    #     "dnh": {
-    #       "0-19": 1.0,
-    #       "20-39": 1.0,
-    #       "40-64": 1.60,
-    #       "65+": 1.60
-    #     },
-    #     "rel_inf_prob": 1.50,
-    #     "pS": 1.0
-    #   })
+    prior_fit_model = CovidModel(params='input/params.json', tslices=[0, tmax], engine=engine)
+    # prior_fit_model.gparams.update({'delta_vacc_escape': 0.0})
+    # prior_fit_model.gparams['variants']['delta']['multipliers']['hosp'].update({"0-19": 2.52, "20-39": 2.52, "40-64": 2.52, "65+": 2.52})
+    # print(prior_fit_model.gparams['delta_vacc_escape'], models_by_vacc_scen['high vacc. uptake'].gparams['delta_vacc_escape'])
+    # print(prior_fit_model.gparams['variants']['delta']['multipliers']['hosp'], models_by_vacc_scen['high vacc. uptake'].gparams['variants']['delta']['multipliers']['hosp'])
+
     prior_fit_model.prep(vacc_proj_scen=primary_vacc_scen)
     run_model(prior_fit_model, prior_fit_id, fit_tags=tags)
 
@@ -155,8 +142,9 @@ def main():
         for tcsd in tc_shift_dates:
             for vacc_scen in models_by_vacc_scen.keys():
                 tags = {'run_type': 'TC Shift Projection', 'batch': batch, 'tc_shift': f'{int(100 * tcs)}%',
-                        'tc_shift_date': tcsd.strftime('%b %#d'), 'vacc_cap': vacc_scen}
+                        'tc_shift_date': f'{tcsd.strftime("%b %#d")} - {(tcsd + dt.timedelta(days=tc_shift_days)).strftime("%b %#d")}', 'vacc_cap': vacc_scen}
                 run_model(models_by_vacc_scen[vacc_scen], current_fit_id, tc_shift=tcs, tc_shift_date=tcsd, fit_tags=tags)
+                run_model(models_with_increased_under20_inf_prob[vacc_scen], current_fit_id, tc_shift=tcs, tc_shift_date=tcsd, fit_tags={**tags, **{'tc_shift': tags['tc_shift'] + '; school-effect'}})
 
     df = pd.concat(legacy_outputs)
     df.index.names = ['scenario', 'time']

@@ -3,8 +3,10 @@ import math
 import datetime as dt
 import scipy.integrate as spi
 import scipy.optimize as spo
+import pyswarms as ps
 from sqlalchemy import MetaData
 from datetime import datetime
+import itertools
 from data_imports import get_vaccinations, get_hosps
 from utils import *
 
@@ -12,7 +14,7 @@ from utils import *
 # class used to run the model given a set of parameters, including transmission control (ef)
 class CovidModel:
     # the variables in the differential equation
-    vars = ['S', 'E', 'I', 'Ih', 'A', 'R', 'RA', 'V', 'D']
+    vars = ['S', 'E', 'I', 'Ih', 'A', 'R', 'RA', 'V', 'Vxd', 'D']
     transitions = [
         ('s', 'e', 'rel_inf_prob'),
         ('e', 'i', 'pS'),
@@ -20,7 +22,6 @@ class CovidModel:
         ('i', 'd', 'dnh'),
         ('h', 'd', 'dh')]
 
-    # groups representing four different age groups
     groups = ['0-19', '20-39', '40-64', '65+']
 
     # the starting date of the model
@@ -40,6 +41,9 @@ class CovidModel:
         self.vacc_trans_mults_df = None
         self.vacc_prevalence_df = None
 
+        # variants
+        self.variant_prevalence_df = None
+
         # transmission control parameters
         self.efs = efs
         self.ef_by_t = None
@@ -47,12 +51,12 @@ class CovidModel:
         # the var values for the solution; these get populated when self.solve_seir is run
         self.solution = None
         self.solution_y = None
-        self.solution_ydf = None
+        self.solution_ydf_full = None
 
         # used to connect up with the matching fit in the database
         self.fit_id = fit_id
 
-    def prep(self, vacc_proj_scen='high vacc. uptake'):
+    def prep(self, vacc_proj_scen='current trajectory'):
         vacc_proj_params = json.load(open('input/vacc_proj_params.json'))[vacc_proj_scen]
         vacc_immun_params = json.load(open('input/vacc_immun_params.json'))
 
@@ -93,6 +97,13 @@ class CovidModel:
     @classmethod
     def y_to_df(cls, y):
         return pd.DataFrame(np.array(y).reshape(len(cls.groups), len(cls.vars)), columns=cls.vars, index=cls.groups)
+
+    @property
+    def solution_ydf(self):
+        df = self.solution_ydf_full.copy()
+        # df['V'] = df['V'] + df['Vxd']
+        # df = df.drop(columns='Vxd')
+        return df
 
     # handy properties for the beginning t, end t, and the full range of t values
     @property
@@ -165,10 +176,10 @@ class CovidModel:
         self.vacc_rate_df = get_vaccinations(self.engine
                              , from_date=self.datemin
                              , proj_to_date=self.daterange.max()
-                             , proj_lookback=7
+                             , proj_lookback=proj_params['lookback']
                              , proj_fixed_rates=proj_params['fixed_rates'] if 'fixed_rates' in proj_params.keys() else None
                              , max_cumu={g: self.gparams['groupN'][g] * proj_params['max_cumu'][g] for g in self.groups}
-                             , max_rate_per_remaining=0.04
+                             , max_rate_per_remaining=proj_params['max_rate_per_remaining']
                              , realloc_priority=None)
 
         self.vacc_rate_df.index = self.vacc_rate_df.index.set_levels((self.vacc_rate_df.index.unique(0) - self.datemin).days, level=0).set_names('t', level=0)
@@ -246,6 +257,13 @@ class CovidModel:
         df.index = df.index.set_names(['variant', 't', 'group']).reorder_levels(['t', 'group', 'variant'])
         df = df.sort_index()
 
+        # fill in future variant prevalence by duplicating the last row
+        variant_input_tmax = df.index.get_level_values('t').max()
+        if variant_input_tmax < self.tmax:
+            # projections = pd.concat({(t, group): df[(variant_input_tmax, group)] for t, group in itertools.product(range(variant_input_tmax + 1), self.groups)})
+            projections = pd.concat({t: df.loc[variant_input_tmax] for t in range(variant_input_tmax + 1, self.tmax)})
+            df = pd.concat([df, projections]).sort_index()
+
         # calculate multipliers; run s -> e separately, because we're setting the same variant prevalences in S and E
         df['s_prev'] = df['e_prev']
         df = self.calc_multipliers(df, start_at=0, end_at=0)
@@ -261,6 +279,8 @@ class CovidModel:
                         self.gparams_lookup[t][group][label] *= sums.loc[(min(t, variant_tmax), group), f'{label}_flow']
                     if len(set(self.gparams_lookup[t][g][label] for g in self.groups)) == 1:
                         self.gparams_lookup[t][None][label] = self.gparams_lookup[t][self.groups[0]][label]
+
+        self.variant_prevalence_df = df
 
     # provide a dataframe with [compartment]_prev as the initial prevalence and this function will add the flows necessary to calc the downstream multipliers
     def calc_multipliers(self, df, start_at=0, end_at=10, add_remaining=True):
@@ -319,7 +339,7 @@ class CovidModel:
         self.ef_by_t = {t: get_value_from_slices(self.tslices, list(ef_by_slice), t) for t in self.trange}
 
     # extend the time range with an additional slice; should maybe change how this works to return a new CovidModel instead
-    def add_tslice(self, t, ef):
+    def add_tslice(self, t, ef=None):
         if t <= self.tslices[-2]:
             raise ValueError(f'New tslice (t={t}) must be greater than the second to last tslices (t={self.tslices[-2]}).')
         if t < self.tmax:
@@ -328,8 +348,9 @@ class CovidModel:
             self.tslices.append(tmax)
         else:
             self.tslices.append(t)
-        self.efs.append(ef)
-        self.set_ef_by_t(self.efs)
+        if ef:
+            self.efs.append(ef)
+            self.set_ef_by_t(self.efs)
         self.fit_id = None
 
     # this is the rate of flow from S -> E, based on beta, current prevalence, TC, variants, and a bunch of paramaters that should probably be deprecated
@@ -340,23 +361,33 @@ class CovidModel:
 
     # the diff eq for a single group; will be called four times in the actual diff eq
     @staticmethod
-    def single_group_seir(single_group_y, transm_per_susc, vacc_immun_gain, vacc_immun_loss, alpha, gamma, pS, hosp, hlos, dnh, dh, groupN, dimmuneI=999999, dimmuneA=999999, **excess_args):
+    def single_group_seir(single_group_y, transm_per_susc, vacc_immun_gain, vacc_immun_loss, alpha, gamma, pS, hosp, hlos, dnh, dh, groupN, delta_vacc_escape, delta_share, immune_rate_I, immune_rate_A, dimmuneI=999999, dimmuneA=999999, **excess_args):
 
-        S, E, I, Ih, A, R, RA, V, D = single_group_y
+        S, E, I, Ih, A, R, RA, V, Vxd, D = single_group_y
 
-        daily_vacc_per_elig = vacc_immun_gain / (groupN - V - Ih - D)
+        daily_vacc_per_elig = vacc_immun_gain / (groupN - V - Vxd - Ih - D)
 
-        dS = - S * transm_per_susc + R / dimmuneI + RA / dimmuneA - S * daily_vacc_per_elig + vacc_immun_loss  # susceptible & not vaccine-immune
-        dE = - E / alpha + S * transm_per_susc  # exposed
+        I2R = I * (gamma * (1 - hosp - dnh)) * immune_rate_I
+        I2S = I * (gamma * (1 - hosp - dnh)) * (1 - immune_rate_I)
+
+        Ih2R = (1 - dh) * Ih / hlos * immune_rate_I
+        Ih2S = (1 - dh) * Ih / hlos * (1 - immune_rate_I)
+
+        A2RA = A * gamma * immune_rate_A
+        A2S = A * gamma * (1 - immune_rate_A)
+
+        dS = - S * transm_per_susc + R / dimmuneI + RA / dimmuneA - S * daily_vacc_per_elig + vacc_immun_loss + I2S + Ih2S + A2S  # susceptible & not vaccine-immune
+        dE = - E / alpha + S * transm_per_susc + Vxd * transm_per_susc * delta_share  # exposed
         dI = (E * pS) / alpha - I * gamma  # infectious & symptomatic
         dIh = I * hosp * gamma - Ih / hlos  # hospitalized (not considered infectious)
         dA = E * (1 - pS) / alpha - A * gamma  # infectious asymptomatic
-        dR = I * (gamma * (1 - hosp - dnh)) + (1 - dh) * Ih / hlos - R / dimmuneI - R * daily_vacc_per_elig  # recovered from symp-not-hosp & immune & not vaccine-immune
-        dRA = A * gamma - RA / dimmuneA - RA * daily_vacc_per_elig  # recovered from asymptomatic & immune & not vaccine-immune
-        dV = (S + R + RA) * daily_vacc_per_elig - vacc_immun_loss  # vaccine-immune
+        dR = I2R + Ih2R - R / dimmuneI - R * daily_vacc_per_elig  # recovered from symp-not-hosp & immune & not vaccine-immune
+        dRA = A2RA - RA / dimmuneA - RA * daily_vacc_per_elig  # recovered from asymptomatic & immune & not vaccine-immune
+        dV = (S + R + RA) * daily_vacc_per_elig * (1 - delta_vacc_escape) - vacc_immun_loss * (1 - delta_vacc_escape)  # vaccine-immune
+        dVxd = (S + R + RA) * daily_vacc_per_elig * delta_vacc_escape - vacc_immun_loss * delta_vacc_escape - Vxd * transm_per_susc * delta_share  # vaccine-immune except against delta (problem with too many people exiting)
         dD = dnh * I * gamma + dh * Ih / hlos  # death
 
-        return dS, dE, dI, dIh, dA, dR, dRA, dV, dD
+        return dS, dE, dI, dIh, dA, dR, dRA, dV, dVxd, dD
 
     # the differential equation, takes y, outputs dy
     def seir(self, t, y):
@@ -369,11 +400,12 @@ class CovidModel:
 
         # build dy
         dy = []
-        transm = CovidModel.daily_transmission_per_susc(ef, I_total=ydf['I'].sum(), A_total=ydf['A'].sum(), **params[None])
         for group in self.groups:
+            transm = CovidModel.daily_transmission_per_susc(ef, I_total=ydf['I'].sum(), A_total=ydf['A'].sum(), **params[group])
             dy += CovidModel.single_group_seir(
                 single_group_y=list(ydf.loc[group, :]),
                 transm_per_susc=transm,
+                delta_share=self.variant_prevalence_df.loc[(t_int, group, 'delta'), 'e_prev'],
                 **params[group])
 
         return dy
@@ -396,7 +428,7 @@ class CovidModel:
         if not self.solution.success:
             raise RuntimeError(f'ODE solver failed with message: {self.solution.message}')
         self.solution_y = np.transpose(self.solution.y)
-        self.solution_ydf = pd.concat([self.y_to_df(self.solution_y[t]) for t in self.trange], keys=self.trange, names=['t', 'group'])
+        self.solution_ydf_full = pd.concat([self.y_to_df(self.solution_y[t]) for t in self.trange], keys=self.trange, names=['t', 'group'])
 
     # count the total hosps by t as the sum of Ih and Ic
     def total_hosps(self):
@@ -456,13 +488,14 @@ class CovidModel:
 # class to find an optimal fit of transmission control (ef) values to produce model results that align with acutal hospitalizations
 class CovidModelFit:
 
-    def __init__(self, tslices, fixed_efs, fitted_efs=None, efs_cov=None, fit_params=None, actual_hosp=None, tags=None):
+    def __init__(self, tslices, fixed_efs, fitted_efs=None, efs_cov=None, fit_params=None, actual_hosp=None, tags=None, model_params=None):
         self.tslices = tslices
         self.fixed_efs = fixed_efs
         self.fitted_efs = fitted_efs
         self.fitted_efs_cov = efs_cov
         self.tags = tags
         self.actual_hosp = actual_hosp
+        self.model_params = model_params
 
         self.model = None
 
@@ -490,7 +523,8 @@ class CovidModelFit:
             , fitted_efs=df['efs'][0][-fit_count:]
             , efs_cov=df['efs_cov'][0]
             , fit_params=df['fit_params'][0]
-            , tags=df['tags'][0])
+            , tags=df['tags'][0]
+            , model_params=df['model_params'][0])
 
     # the number of total ef values, including fixed values
     @property
@@ -524,6 +558,10 @@ class CovidModelFit:
         c = sum(e**2 for e in res)
         return c
 
+    # the cost function to be used for the particle swarm
+    def ps_cost(self, xs):
+        return sum(self.cost(x) for x in xs)
+
     # run an optimization to minimize the cost function using scipy.optimize.minimize()
     # method = 'curve_fit' or 'minimize'
     def run(self, engine, method='curve_fit', model_params='input/params.json'):
@@ -535,7 +573,6 @@ class CovidModelFit:
 
         # run fit
         if method == 'curve_fit':
-
             def func(trange, *efs):
                 return self.run_model_and_get_total_hosps(efs)
             self.fitted_efs, self.fitted_efs_cov = spo.curve_fit(
@@ -553,6 +590,12 @@ class CovidModelFit:
                 , options=self.fit_params)
             print(minimization_results)
             self.fitted_efs = minimization_results.x
+        elif method == 'pswarm':
+            options = {'c1': 0.5, 'c2': 0.3, 'w': 0.9}
+            bounds = ([self.fit_params['ef_min']] * self.fit_count, [self.fit_params['ef_max']] * self.fit_count)
+            optimizer = ps.single.GlobalBestPSO(n_particles=self.fit_count * 2, dimensions=self.fit_count, bounds=bounds, options=options)
+            cost, self.fitted_efs = optimizer.optimize(self.ps_cost, iters=10)
+            print(self.fitted_efs)
 
         self.model.set_ef_by_t(self.efs)
 
