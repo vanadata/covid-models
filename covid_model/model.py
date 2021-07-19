@@ -361,19 +361,28 @@ class CovidModel:
 
     # the diff eq for a single group; will be called four times in the actual diff eq
     @staticmethod
-    def single_group_seir(single_group_y, transm_per_susc, vacc_immun_gain, vacc_immun_loss, alpha, gamma, pS, hosp, hlos, dnh, dh, groupN, delta_vacc_escape, delta_share, dimmuneI=999999, dimmuneA=999999, **excess_args):
+    def single_group_seir(single_group_y, transm_per_susc, vacc_immun_gain, vacc_immun_loss, alpha, gamma, pS, hosp, hlos, dnh, dh, groupN, delta_vacc_escape, delta_share, immune_rate_I, immune_rate_A, dimmuneI=999999, dimmuneA=999999, **excess_args):
 
         S, E, I, Ih, A, R, RA, V, Vxd, D = single_group_y
 
         daily_vacc_per_elig = vacc_immun_gain / (groupN - V - Vxd - Ih - D)
 
-        dS = - S * transm_per_susc + R / dimmuneI + RA / dimmuneA - S * daily_vacc_per_elig + vacc_immun_loss  # susceptible & not vaccine-immune
+        I2R = I * (gamma * (1 - hosp - dnh)) * immune_rate_I
+        I2S = I * (gamma * (1 - hosp - dnh)) * (1 - immune_rate_I)
+
+        Ih2R = (1 - dh) * Ih / hlos * immune_rate_I
+        Ih2S = (1 - dh) * Ih / hlos * (1 - immune_rate_I)
+
+        A2RA = A * gamma * immune_rate_A
+        A2S = A * gamma * (1 - immune_rate_A)
+
+        dS = - S * transm_per_susc + R / dimmuneI + RA / dimmuneA - S * daily_vacc_per_elig + vacc_immun_loss + I2S + Ih2S + A2S  # susceptible & not vaccine-immune
         dE = - E / alpha + S * transm_per_susc + Vxd * transm_per_susc * delta_share  # exposed
         dI = (E * pS) / alpha - I * gamma  # infectious & symptomatic
         dIh = I * hosp * gamma - Ih / hlos  # hospitalized (not considered infectious)
         dA = E * (1 - pS) / alpha - A * gamma  # infectious asymptomatic
-        dR = I * (gamma * (1 - hosp - dnh)) + (1 - dh) * Ih / hlos - R / dimmuneI - R * daily_vacc_per_elig  # recovered from symp-not-hosp & immune & not vaccine-immune
-        dRA = A * gamma - RA / dimmuneA - RA * daily_vacc_per_elig  # recovered from asymptomatic & immune & not vaccine-immune
+        dR = I2R + Ih2R - R / dimmuneI - R * daily_vacc_per_elig  # recovered from symp-not-hosp & immune & not vaccine-immune
+        dRA = A2RA - RA / dimmuneA - RA * daily_vacc_per_elig  # recovered from asymptomatic & immune & not vaccine-immune
         dV = (S + R + RA) * daily_vacc_per_elig * (1 - delta_vacc_escape) - vacc_immun_loss * (1 - delta_vacc_escape)  # vaccine-immune
         dVxd = (S + R + RA) * daily_vacc_per_elig * delta_vacc_escape - vacc_immun_loss * delta_vacc_escape - Vxd * transm_per_susc * delta_share  # vaccine-immune except against delta (problem with too many people exiting)
         dD = dnh * I * gamma + dh * Ih / hlos  # death

@@ -62,8 +62,10 @@
     }
   },
   "dvacc": 3650,
-  "dimmuneA": 190,
-  "dimmuneI": 365,
+  "immune_rate_I": 0.925,
+  "immune_rate_A": 0.85,
+  "dimmuneA": 2514,
+  "dimmuneI": 2514  ,
   "max_vacc_share_of_remaining": 0.04,
   "vaccines": {},
   "variants": {

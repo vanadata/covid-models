@@ -51,7 +51,7 @@ def total_hosps(model, group=None, **plot_params):
 
 
 def modeled(model, compartments, transform=lambda x: x, **plot_params):
-    if type(compartments) == 'str':
+    if type(compartments) == str:
         compartments = [compartments]
     plt.plot(model.daterange, transform(model.solution_ydf_summed[compartments].sum(axis=1)), **plot_params)
 
@@ -223,27 +223,35 @@ if __name__ == '__main__':
     # uq_spaghetti(CovidModelFit.from_db(engine, 2330), sample_n=200, tmax=600)
     # uq_spaghetti(CovidModelFit.from_db(engine, 1992), sample_n=200, tmax=600)
 
-    # actual_hosps(engine, color='black')
+    actual_hosps(engine, color='black')
+    model = CovidModel('input/params.json', [0, 700], engine=engine)
+    model.set_ef_from_db(3269)
+    model.prep(vacc_proj_scen='current trajectory')
+    model.solve_seir()
+    modeled(model, ['Ih'], color='red')
+
+    plt.show()
+
     # fig, axs = plt.subplots(2, 2)
 
-    fits = {'6-12 mo. immunity': 2470, '12-24 mo. immunity': 2467, 'indefinite immunity': 2502}
-    colors = ['r', 'b', 'g', 'black', 'orange', 'pink']
-    for i, (label, fit_id) in enumerate(fits.items()):
-        fit1 = CovidModelFit.from_db(conn=engine, fit_id=fit_id)
-        model1 = CovidModel(fit1.model_params, [0, 600], engine=engine)
-        model1.set_ef_from_db(fit_id)
-        model1.prep()
-        model1.solve_seir()
-        # modeled(model1, compartments=['E'], transform=lambda x: x.cumsum()/4.0, c=colors[i], label=label)
-        # modeled(model1, compartments=['V', 'Vxd'], transform=lambda x: x/5813208.0, c=colors[i], label=label)
-        modeled(model1, compartments=['I', 'A'], c=colors[i], label=label)
-        # transmission_control(model1, c=colors[i], label=label)
-        # re_estimates(model1, c=colors[i], label=label)
-        # modeled_by_group(model1, axs=axs, compartments=['I', 'A'], c=colors[i], label=label)
-
-    plt.legend(loc='best')
-    plt.ylabel('People Infected')
-    plt.show()
+    # fits = {'6-12 mo. immunity': 2470, '12-24 mo. immunity': 2467, 'indefinite immunity': 2502}
+    # colors = ['r', 'b', 'g', 'black', 'orange', 'pink']
+    # for i, (label, fit_id) in enumerate(fits.items()):
+    #     fit1 = CovidModelFit.from_db(conn=engine, fit_id=fit_id)
+    #     model1 = CovidModel(fit1.model_params, [0, 600], engine=engine)
+    #     model1.set_ef_from_db(fit_id)
+    #     model1.prep()
+    #     model1.solve_seir()
+    #     # modeled(model1, compartments=['E'], transform=lambda x: x.cumsum()/4.0, c=colors[i], label=label)
+    #     # modeled(model1, compartments=['V', 'Vxd'], transform=lambda x: x/5813208.0, c=colors[i], label=label)
+    #     modeled(model1, compartments=['I', 'A'], c=colors[i], label=label)
+    #     # transmission_control(model1, c=colors[i], label=label)
+    #     # re_estimates(model1, c=colors[i], label=label)
+    #     # modeled_by_group(model1, axs=axs, compartments=['I', 'A'], c=colors[i], label=label)
+    #
+    # plt.legend(loc='best')
+    # plt.ylabel('People Infected')
+    # plt.show()
 
     # plt.legend(loc='best')
     # plt.xlabel('Days')
