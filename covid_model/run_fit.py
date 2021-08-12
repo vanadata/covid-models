@@ -8,7 +8,7 @@ from time import perf_counter
 import argparse
 
 
-def run_fit(engine, fit_id, look_back=3, batch_size=3, look_back_date=None, model_params='input/params.json', fit_params={}):
+def run_fit(engine, fit_id, look_back=3, batch_size=3, look_back_date=None, model_params='input/params.json', tags=None, fit_params={}):
     # load actual hospitalization data for fitting
     hosp_data = get_hosps(engine, dt.datetime(2020, 1, 24))
 
@@ -23,9 +23,12 @@ def run_fit(engine, fit_id, look_back=3, batch_size=3, look_back_date=None, mode
         look_back = sum(1 for tslice in tslices if tslice > (look_back_date - CovidModel.datemin).days)
 
     # run fits
+    tags = tags if tags is not None else {}
     for i in range(len(tslices) - look_back, len(tslices) - batch_size + 1):
-        print(f'Running fit for t-slices {tslices[(i-1):(i + batch_size)]}')
-        fit = CovidModelFit(tslices=tslices[:(i + batch_size)], fixed_efs=efs[:(i-1)], actual_hosp=hosp_data, fit_params={'efs0': (efs + [0.75]*999)[i:(i + batch_size)], **fit_params})
+        fit_type = 'final' if i == len(tslices) - batch_size else 'intermediate'
+        fit = CovidModelFit(tslices=tslices[:(i + batch_size)], fixed_efs=efs[:(i-1)], actual_hosp=hosp_data
+                            , fit_params={'efs0': (efs + [0.75]*999)[i:(i + batch_size)], **fit_params}
+                            , tags={'fit_type': fit_type, **(tags if tags is not None else {})})
 
         t1_start = perf_counter()
         fit.run(engine, model_params=model_params)
