@@ -62,6 +62,9 @@ class CovidModel:
 
         self.set_gparams(self.gparams)
 
+        if 'variants' in self.gparams and self.gparams['variants']:
+            self.set_variant_params(self.gparams['variants'])
+
         self.set_vacc_rates(vacc_proj_params)
         self.set_vacc_immun(vacc_immun_params)
         self.apply_vacc_multipliers(vacc_immun_params)
@@ -69,8 +72,6 @@ class CovidModel:
         if self.efs is not None:
             self.set_ef_by_t(self.efs)
 
-        if 'variants' in self.gparams and self.gparams['variants']:
-            self.set_variant_params(self.gparams['variants'])
 
     def set_ef_from_db(self, fit_id, extend=True):
         fit = CovidModelFit.from_db(self.engine, fit_id)
@@ -85,13 +86,13 @@ class CovidModel:
         self.set_ef_by_t(self.efs)
 
     # create using on a fit that was run previously or manually inserted into the database
-    # @staticmethod
-    # def from_fit(conn, fit_id, params=None):
-    #     fit = CovidModelFit.from_db(conn, fit_id)
-    #     if params is not None:
-    #         fit.model.gparams = params if type(params) == dict else json.load(open(params)) if params else None
-    #
-    #     return fit.model
+    @staticmethod
+    def from_fit(conn, fit_id):
+        fit = CovidModelFit.from_db(conn, fit_id)
+        model = CovidModel(params=fit.model_params, tslices=fit.tslices, engine=conn)
+        model.set_ef_by_t(fit.efs)
+
+        return model
 
     # coerce a "y", a list of length (num of vars)*(num of groups), into a dataframe with dims (num of groups)x(num of vars)
     @classmethod
@@ -145,31 +146,31 @@ class CovidModel:
         oef_by_t = self.obs_ef_by_t
         return [np.array([oef_by_t[t] for t in range(self.tslices[i], self.tslices[i+1])]).mean() for i in range(len(self.tslices) - 1)]
 
-    def get_vacc_rates_by_t_from_db(self, lookback=7):
-        sql = f"""select 
-            (extract(epoch from reporting_date - %s) / 60.0 / 60.0 / 24.0)::int as t
-            , count_type as "group"
-            , case date_type when 'vaccine dose 1/2' then 'mrna' when 'vaccine dose 1/1' then 'jnj' end as vacc
-            , sum(total_count) as rate
-        from cdphe.covid19_county_summary
-        where date_type like 'vaccine dose 1/_'
-        group by 1, 2, 3
-        order by 1, 2, 3
-        """
-        df = pd.read_sql(sql, self.engine, params=(self.datemin,), index_col=['t', 'group', 'vacc'])
-
-        # add projections
-        max_t = df.index.get_level_values('t').max()
-        if self.tmax > max_t:
-            # project rates based on the last 14 days of data
-            projected_rates = df.loc[max_t - (lookback-1):].groupby(['group', 'vacc']).sum() / float(lookback)
-            # used fixed value from params ('projected_rate'), if present
-            projected_rates['rate'] = pd.DataFrame({vacc: specs['projected_rate'] for vacc, specs in self.gparams['vaccines'].items() if 'projected_rate' in specs.keys()}).stack().combine_first(projected_rates['rate'])
-            # add projections to dataframe
-            projections = pd.concat([projected_rates.assign(t=t) for t in range(max_t + 1, self.tmax + 1)]).set_index('t', append=True).reorder_levels(['t', 'group', 'vacc'])
-            df = pd.concat([df, projections])
-
-        return df, max_t + 1
+    # def get_vacc_rates_by_t_from_db(self, lookback=7):
+    #     sql = f"""select
+    #         (extract(epoch from reporting_date - %s) / 60.0 / 60.0 / 24.0)::int as t
+    #         , count_type as "group"
+    #         , case date_type when 'vaccine dose 1/2' then 'mrna' when 'vaccine dose 1/1' then 'jnj' end as vacc
+    #         , sum(total_count) as rate
+    #     from cdphe.covid19_county_summary
+    #     where date_type like 'vaccine dose 1/_'
+    #     group by 1, 2, 3
+    #     order by 1, 2, 3
+    #     """
+    #     df = pd.read_sql(sql, self.engine, params=(self.datemin,), index_col=['t', 'group', 'vacc'])
+    #
+    #     # add projections
+    #     max_t = df.index.get_level_values('t').max()
+    #     if self.tmax > max_t:
+    #         # project rates based on the last 14 days of data
+    #         projected_rates = df.loc[max_t - (lookback-1):].groupby(['group', 'vacc']).sum() / float(lookback)
+    #         # used fixed value from params ('projected_rate'), if present
+    #         projected_rates['rate'] = pd.DataFrame({vacc: specs['projected_rate'] for vacc, specs in self.gparams['vaccines'].items() if 'projected_rate' in specs.keys()}).stack().combine_first(projected_rates['rate'])
+    #         # add projections to dataframe
+    #         projections = pd.concat([projected_rates.assign(t=t) for t in range(max_t + 1, self.tmax + 1)]).set_index('t', append=True).reorder_levels(['t', 'group', 'vacc'])
+    #         df = pd.concat([df, projections])
+    #
+    #     return df, max_t + 1
 
     # build dataframe containing vaccine first-dose rates by day by group by vaccine
     def set_vacc_rates(self, proj_params):
@@ -213,7 +214,9 @@ class CovidModel:
                 mults, s_prevs = ([], [])
                 for vacc, vacc_specs in immun_params.items():
                     for delay_specs in vacc_specs['multipliers']:
-                        mults.append(delay_specs['value'])
+                        mult = delay_specs['value'].copy()
+                        mult['rel_inf_prob'] += self.gparams['delta_vacc_escape'] * self.variant_prevalence_df.loc[(t, g, 'delta'), 'e_prev']
+                        mults.append(mult)
                         s_prevs.append(self.vacc_rate_df.loc[(max(t - delay_specs['delay'], 0), g, vacc), 'cumu'] / self.gparams['groupN'][g])
                 combined_mults[(t, g)], vacc_prevs[(t, g)] = calc_multiple_multipliers(self.transitions, mults, s_prevs)
 
@@ -356,8 +359,7 @@ class CovidModel:
     # this is the rate of flow from S -> E, based on beta, current prevalence, TC, variants, and a bunch of paramaters that should probably be deprecated
     @staticmethod
     def daily_transmission_per_susc(ef, I_total, A_total, rel_inf_prob, N, beta, temp, mask, lamb, siI, ramp, **excess_args):
-        return beta * (1 - ef) * rel_inf_prob * temp * (
-                I_total * (1 - (mask * 0.03)) * lamb * (1 - (siI + ramp)) + A_total * (1 - (mask * 0.2667))) / N
+        return beta * (1 - ef) * rel_inf_prob * (I_total * lamb + A_total) / N
 
     # the diff eq for a single group; will be called four times in the actual diff eq
     @staticmethod
@@ -482,7 +484,6 @@ class CovidModel:
     def write_gparams_lookup_to_csv(self, fname):
         df_by_t = {t: pd.DataFrame.from_dict(df_by_group, orient='index') for t, df_by_group in self.gparams_lookup.items()}
         pd.concat(df_by_t, names=['t', 'group']).to_csv(fname)
-
 
 
 # class to find an optimal fit of transmission control (ef) values to produce model results that align with acutal hospitalizations

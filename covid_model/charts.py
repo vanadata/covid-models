@@ -3,7 +3,12 @@ from model import CovidModel, CovidModelFit
 from db import db_engine
 import scipy.stats as sps
 import matplotlib.pyplot as plt
-import copy
+import matplotlib.ticker as mtick
+import matplotlib.dates as mdates
+from matplotlib import cm, colors
+import seaborn as sns
+import datetime as dt
+import numpy as np
 import pandas as pd
 
 
@@ -107,6 +112,17 @@ def actual_vs_modeled_deaths_by_group(actual_deaths_fname, model, **plot_params)
     fig.tight_layout()
 
 
+# UQ TC plot
+def uq_tc(fit: CovidModelFit, sample_n=100, **plot_params):
+    # get sample TC values
+    fitted_efs_dist = sps.multivariate_normal(mean=fit.fitted_efs, cov=fit.fitted_efs_cov)
+    samples = fitted_efs_dist.rvs(sample_n)
+    for sample_fitted_efs in samples:
+        plt.plot(fit.tslices[:-1], list(fit.fixed_efs) + list(sample_fitted_efs), **{'marker': 'o', 'linestyle': 'None', 'color': 'darkorange', 'alpha': 0.025, **plot_params})
+
+    plt.xlabel('t')
+    plt.ylabel('TCpb')
+
 # UQ sqaghetti plot
 def uq_spaghetti(fit, sample_n=100, tmax=600, **plot_params):
     # get sample TC values
@@ -124,8 +140,94 @@ def uq_spaghetti(fit, sample_n=100, tmax=600, **plot_params):
         plt.plot(model.daterange, model.total_hosps(), **{'color': 'darkblue', 'alpha': 0.025, **plot_params})
 
 
+def tc_for_given_r_and_vacc(solved_model: CovidModel, t, r, vacc_share):
+    y = solved_model.solution_ydf_summed.loc[t]
+    p = solved_model.gparams_lookup[t]
+    current_vacc_immun = y['V'] / p[None]['N']
+    acq_immun = (y['R'] + y['RA']) / p[None]['N'] * (1 + current_vacc_immun)  # adding back in the acq immun people who were moved to vacc immun
+    eff_beta_at_tc100 = p[None]['beta'] * p[None]['rel_inf_prob'] * (y['I'] * p[None]['lamb'] + y['A'] * 1) / (y['I'] + y['A'])
+    r0_at_tc100 = eff_beta_at_tc100 / p[None]['gamma']
+
+    jnj_share = 0.078
+    vacc_immun = (jnj_share*0.72 + (1-jnj_share)*0.9) * 0.9 * vacc_share
+    r_at_tc100_space = r0_at_tc100 * (1 - vacc_immun - acq_immun + vacc_immun*acq_immun)
+    return 1 - r / r_at_tc100_space
+
+
+def r_for_given_tc_and_vacc(solved_model: CovidModel, t, tc, vacc_share):
+    y = solved_model.solution_ydf_summed.loc[t]
+    p = solved_model.gparams_lookup[t]
+    current_vacc_immun = y['V'] / p[None]['N']
+    acq_immun = (y['R'] + y['RA']) / p[None]['N'] * (1 + current_vacc_immun)  # adding back in the acq immun people who were moved to vacc immun
+    # new_acq_immun_by_t = solved_model.solution_ydf_summed['E'] / 4.0 * 0.85 * np.exp(-(t - solved_model.solution_ydf_summed.index.values)/2514)
+    # acq_immun = new_acq_immun_by_t.cumsum().loc[t] / p[None]['N']
+    eff_beta_at_tc100 = p[None]['beta'] * p[None]['rel_inf_prob'] * (y['I'] * p[None]['lamb'] + y['A'] * 1) / (y['I'] + y['A'])
+    r0_at_tc100 = eff_beta_at_tc100 / p[None]['gamma']
+
+    jnj_share = 0.078
+    vacc_immun = (jnj_share*0.72 + (1-jnj_share)*0.9) * 0.9 * vacc_share
+    r_at_tc100_space = r0_at_tc100 * (1 - vacc_immun - acq_immun + vacc_immun*acq_immun)
+    return r_at_tc100_space * (1 - tc)
+
+
+def r_equals_1(solved_model: CovidModel, t=None):
+    if t is None:
+        t = (dt.datetime.now() - solved_model.datemin).days
+
+    increment = 0.001
+    vacc_space = np.arange(0.3, 0.95, increment)
+    tc_space = np.arange(1.0, 0.4, -1 * increment)
+    r_matrix = np.array([r_for_given_tc_and_vacc(solved_model, t, tc, vacc_space) for tc in tc_space])
+    r_df = pd.DataFrame(data=r_matrix, index=['{:.0%}'.format(tc) for tc in tc_space], columns=['{:.0%}'.format(v) for v in vacc_space])
+    # r_df = pd.DataFrame(data=r_matrix, index=tc_space, columns=vacc_immun_space)
+
+    fig, ax = plt.subplots()
+    sns.heatmap(r_df, ax=ax, cmap='Spectral_r', center=1.0, xticklabels=50, yticklabels=50, vmax=3.0)
+    # sns.heatmap(r_df, ax=ax, cmap='bwr', center=1.0, xticklabels=50, yticklabels=50, vmax=3.0)
+
+    # plot R = 1
+    tc_for_r_equals_1_space = tc_for_given_r_and_vacc(solved_model, t, 1.0, vacc_space)
+    ax.plot(range(len(vacc_space)), (tc_space.max() - tc_for_r_equals_1_space) // increment, color='navy')
+    ax.set_xlabel('% of Population Fully Vaccinated')
+    ax.set_ylabel('TCpb')
+    ax.set_title('Re by Vaccination Rate and TCpb')
+    # ax.xaxis.set_major_formatter(mtick.PercentFormatter(1.0))
+    # ax.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
+
+    # plot current point
+    current_vacc = solved_model.vacc_rate_df.loc[t, 'cumu'].sum() / solved_model.gparams_lookup[t][None]['N']
+    current_tc = solved_model.ef_by_t[t]
+    current_r = r_for_given_tc_and_vacc(solved_model, t, current_tc, current_vacc)
+    print(f"Current Vacc.: {'{:.0%}'.format(current_vacc)}")
+    print(f"Current TCpb: {'{:.0%}'.format(current_tc)}")
+    print(f"Current Re: {round(current_r, 2)}")
+    ax.plot((current_vacc - vacc_space.min()) // increment, (tc_space.max() - current_tc) // increment, marker='o', color='navy')
+
+    # formatting
+    ax.grid(color='white')
+
+
 if __name__ == '__main__':
     engine = db_engine()
+
+    # model = CovidModel('input/params.json', [0, 700], engine=engine)
+    # model.set_ef_from_db(3770)
+
+    # model.prep()
+    # model.solve_seir()
+    # actual_hosps(engine)
+    # modeled(model, 'Ih')
+    # plt.show()
+
+    # uq_spaghetti(CovidModelFit.from_db(engine, 3770), sample_n=200, tmax=650)
+    uq_tc(CovidModelFit.from_db(engine, 3770), sample_n=300)
+    plt.show()
+
+    # model.prep(vacc_proj_scen='current trajectory')
+    # model.solve_seir()
+    # r_equals_1(model)
+    # plt.tight_layout()
+    # plt.show()
 
     # model = CovidModel(params='input/params.json', tslices=[0, 700], engine=engine)
     # model.gparams.update({
@@ -223,14 +325,14 @@ if __name__ == '__main__':
     # uq_spaghetti(CovidModelFit.from_db(engine, 2330), sample_n=200, tmax=600)
     # uq_spaghetti(CovidModelFit.from_db(engine, 1992), sample_n=200, tmax=600)
 
-    actual_hosps(engine, color='black')
-    model = CovidModel('input/params.json', [0, 700], engine=engine)
-    model.set_ef_from_db(3269)
-    model.prep(vacc_proj_scen='current trajectory')
-    model.solve_seir()
-    modeled(model, ['Ih'], color='red')
-
-    plt.show()
+    # actual_hosps(engine, color='black')
+    # model = CovidModel('input/params.json', [0, 700], engine=engine)
+    # model.set_ef_from_db(3472)
+    # model.prep(vacc_proj_scen='current trajectory')
+    # model.solve_seir()
+    # modeled(model, ['Ih'], color='red')
+    #
+    # plt.show()
 
     # fig, axs = plt.subplots(2, 2)
 

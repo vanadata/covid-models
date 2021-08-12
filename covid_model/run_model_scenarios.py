@@ -89,7 +89,7 @@ def main():
         models_by_vacc_scen[vacc_scen] = CovidModel(params='input/params.json', tslices=[0, tmax], engine=engine)
         models_by_vacc_scen[vacc_scen].prep(vacc_proj_scen=vacc_scen)
         models_with_increased_under20_inf_prob[vacc_scen] = CovidModel(params='input/params.json', tslices=[0, tmax], engine=engine)
-        models_with_increased_under20_inf_prob[vacc_scen].gparams['rel_inf_prob'] = {'tslices': [569], 'value': {'0-19': [1.0, 1.83], '20-39': [1.0, 1.0], '40-64': [1.0, 1.0], '65+': [1.0, 1.0]}}
+        models_with_increased_under20_inf_prob[vacc_scen].gparams['rel_inf_prob'] = {'tslices': [569], 'value': {'0-19': [1.0, 1.6], '20-39': [1.0, 1.0], '40-64': [1.0, 1.0], '65+': [1.0, 1.0]}}
         models_with_increased_under20_inf_prob[vacc_scen].prep(vacc_proj_scen=vacc_scen)
         # models_by_vacc_scen[vacc_scen].write_vacc_to_csv(f'output/daily_vaccination_rates{"_with_lower_vacc_cap" if vacc_scen == "low vacc. uptake" else ""}.csv')
 
@@ -124,6 +124,9 @@ def main():
     # prior fit
     tags = {'run_type': 'Prior', 'batch': batch}
     prior_fit_model = CovidModel(params='input/params.json', tslices=[0, tmax], engine=engine)
+    # prior_fit_model.gparams['immune_rate_A'] = 1.0
+    # prior_fit_model.gparams['immune_rate_I'] = 1.0
+    # prior_fit_model = CovidModel(params='input/params.json', tslices=[0, tmax], engine=engine)
     # prior_fit_model.gparams.update({'delta_vacc_escape': 0.0})
     # prior_fit_model.gparams['variants']['delta']['multipliers']['hosp'].update({"0-19": 2.52, "20-39": 2.52, "40-64": 2.52, "65+": 2.52})
     # print(prior_fit_model.gparams['delta_vacc_escape'], models_by_vacc_scen['high vacc. uptake'].gparams['delta_vacc_escape'])
@@ -144,7 +147,7 @@ def main():
                 tags = {'run_type': 'TC Shift Projection', 'batch': batch, 'tc_shift': f'{int(100 * tcs)}%',
                         'tc_shift_date': f'{tcsd.strftime("%b %#d")} - {(tcsd + dt.timedelta(days=tc_shift_days)).strftime("%b %#d")}', 'vacc_cap': vacc_scen}
                 run_model(models_by_vacc_scen[vacc_scen], current_fit_id, tc_shift=tcs, tc_shift_date=tcsd, fit_tags=tags)
-                run_model(models_with_increased_under20_inf_prob[vacc_scen], current_fit_id, tc_shift=tcs, tc_shift_date=tcsd, fit_tags={**tags, **{'tc_shift': tags['tc_shift'] + '; school-effect'}})
+                run_model(models_with_increased_under20_inf_prob[vacc_scen], current_fit_id, tc_shift=tcs, tc_shift_date=tcsd, fit_tags={**tags, **{'tc_shift': tags['tc_shift'] + '; increased under-18 transm.'}})
 
     df = pd.concat(legacy_outputs)
     df.index.names = ['scenario', 'time']

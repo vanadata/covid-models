@@ -8,7 +8,7 @@ from time import perf_counter
 import argparse
 
 
-def run_fit(engine, fit_id, look_back, batch_size, model_params='input/params.json', fit_params={}):
+def run_fit(engine, fit_id, look_back=3, batch_size=3, look_back_date=None, model_params='input/params.json', fit_params={}):
     # load actual hospitalization data for fitting
     hosp_data = get_hosps(engine, dt.datetime(2020, 1, 24))
 
@@ -18,8 +18,13 @@ def run_fit(engine, fit_id, look_back, batch_size, model_params='input/params.js
     tslices += list(range(tslices[-1] + 14, len(hosp_data) - 1 - 13, 14)) + [len(hosp_data)]
     efs = [float(x) for x in fit.efs]
 
+    # if_look_back_to_date is not None then set look_back
+    if look_back_date is not None:
+        look_back = sum(1 for tslice in tslices if tslice > (look_back_date - CovidModel.datemin).days)
+
     # run fits
     for i in range(len(tslices) - look_back, len(tslices) - batch_size + 1):
+        print(f'Running fit for t-slices {tslices[(i-1):(i + batch_size)]}')
         fit = CovidModelFit(tslices=tslices[:(i + batch_size)], fixed_efs=efs[:(i-1)], actual_hosp=hosp_data, fit_params={'efs0': (efs + [0.75]*999)[i:(i + batch_size)], **fit_params})
 
         t1_start = perf_counter()
@@ -42,15 +47,17 @@ def run():
     # get fit params
     parser = argparse.ArgumentParser()
     parser.add_argument("-lb", "--look_back", type=int, help="the number of (14-day) windows to look back and refit; default to 3")
+    parser.add_argument("-lbd", "--look_back_date", type=str, help="the date (YYYY-MM-DD) from which we want to refit; default to using -lb, which defaults to 3")
     parser.add_argument("-bs", "--batch_size", type=int, help="the number of (14-day) windows to fit in each batch; default to running everything in one batch")
     parser.add_argument("-f", "--fit_id", type=int, help="the fit_id for the last production fit, which will be used to set historical TC values for windows that will not be refit")
     fit_params = parser.parse_args()
     look_back = fit_params.look_back if fit_params.look_back is not None else 3
+    look_back_date = dt.datetime.strptime(fit_params.look_back_date, '%Y-%m-%d')
     batch_size = fit_params.batch_size if fit_params.batch_size is not None else look_back
     fit_id = fit_params.fit_id if fit_params.fit_id is not None else 865
 
     engine = db_engine()
-    fit_id, fit = run_fit(engine, fit_id, look_back, batch_size, fit_params=vars(fit_params))
+    fit_id, fit = run_fit(engine, fit_id, look_back, batch_size, look_back_date=look_back_date, fit_params=vars(fit_params))
 
     actual_hosps(engine)
     total_hosps(fit.model)
