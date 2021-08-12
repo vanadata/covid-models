@@ -9,6 +9,8 @@ import argparse
 import pandas as pd
 
 def run_sensitivity_tests(fit_id, alternate_params, refit_from_date=dt.datetime(2020, 4, 10), batch_size=3, add_base=False):
+    batch = 'sensitivity_' + dt.datetime.now().strftime('%Y%m%d_%H%M%S')
+
     engine = db_engine()
     base_params = CovidModelFit.from_db(engine, fit_id).model_params
 
@@ -21,7 +23,8 @@ def run_sensitivity_tests(fit_id, alternate_params, refit_from_date=dt.datetime(
     fit_ids = {}
     for label, params in scen_params.items():
         print(f'Running fit for scenario {label} with altered parameters {scens[label]}.')
-        fit_ids[label], fits[label] = run_fit(engine, fit_id, batch_size=batch_size, look_back_date=refit_from_date, model_params=params)
+        fit_ids[label], fits[label] = run_fit(engine, fit_id, batch_size=batch_size, look_back_date=refit_from_date, model_params=params
+                                              , tags={'run_type': 'Sensitivity Test', 'batch': batch, 'alt_params': json.dumps(scens[label])})
         modeled(fits[label].model, compartments=['Ih'], label=label)
 
     pd.DataFrame.from_dict(fit_ids, orient='index').to_csv('output/sensitivity_tests_fit_ids.csv', header=False)
