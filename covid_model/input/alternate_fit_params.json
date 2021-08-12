@@ -1,6 +1,0 @@
-{
-    "no-immunity": {"dimmuneA": 1, "dimmuneI": 1},
-    "half-immunity": {"dimmuneA": 95, "dimmuneI": 182},
-    "double-immunity": {"dimmuneA": 380, "dimmuneI": 730},
-    "indefinite-immunity": {"dimmuneA": 999999999, "dimmuneI": 999999999}
-}

@@ -14,7 +14,7 @@ if __name__ == '__main__':
     hosps['time'] = ((pd.to_datetime(hosps['date']) - dt.datetime(2020, 1, 24)) / np.timedelta64(1, 'D')).astype(int)
     hosps[['time', 'date', 'Iht']].to_csv('output/CO_EMR_Hosp.csv', index=False)
 
-    # export vaccinations by county, with projections
+    # export vaccinations, with projections
     gparams = json.load(open('input/params.json', 'r'))
     proj_param_dict = json.load(open('input/vacc_proj_params.json', 'r'))
     vacc_df_dict = {}
@@ -38,6 +38,7 @@ if __name__ == '__main__':
     vacc_df = vacc_df.join(vacc_df[~vacc_df['is_projected']]['first_shot_cumu'].groupby(['vacc_scen', 'group']).max().rename('current_first_shot_cumu'))
     vacc_df.to_csv('output/daily_vaccination_by_age.csv')
 
+    # export vaccination by county, without projections
     print('Exporting vaccination by county...')
     vacc_by_county = get_vaccinations_by_county(engine)
     vacc_by_county.to_csv('output/daily_vaccination_by_age_by_county.csv', index=False)

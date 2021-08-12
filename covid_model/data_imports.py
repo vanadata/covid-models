@@ -84,7 +84,7 @@ def get_vaccinations(engine, from_date=None, proj_to_date=None, proj_lookback=7,
 
         # reduce rates to prevent cumulative vaccination from exceeding max_cumu
         if max_cumu:
-            cumu_vacc = df.loc[:proj_from_date, 'rate'].groupby('group').sum()
+            cumu_vacc = df.loc[:(proj_from_date - dt.timedelta(days=1)), 'rate'].groupby('group').sum()
             groups = realloc_priority if realloc_priority else groups
             for d in proj_date_range:
                 for i in range(len(groups)):
