@@ -174,15 +174,7 @@ class CovidModel:
 
     # build dataframe containing vaccine first-dose rates by day by group by vaccine
     def set_vacc_rates(self, proj_params):
-        self.vacc_rate_df = get_vaccinations(self.engine
-                             , from_date=self.datemin
-                             , proj_to_date=self.daterange.max()
-                             , proj_lookback=proj_params['lookback']
-                             , proj_fixed_rates=proj_params['fixed_rates'] if 'fixed_rates' in proj_params.keys() else None
-                             , max_cumu={g: self.gparams['groupN'][g] * proj_params['max_cumu'][g] for g in self.groups}
-                             , max_rate_per_remaining=proj_params['max_rate_per_remaining']
-                             , realloc_priority=None)
-
+        self.vacc_rate_df = get_vaccinations(self.engine, proj_params, from_date=self.datemin, proj_to_date=self.daterange.max(), groupN=self.gparams['groupN'])
         self.vacc_rate_df.index = self.vacc_rate_df.index.set_levels((self.vacc_rate_df.index.unique(0) - self.datemin).days, level=0).set_names('t', level=0)
         self.vacc_rate_df['cumu'] = self.vacc_rate_df.groupby(['group', 'vacc'])['rate'].cumsum()
 

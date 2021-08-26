@@ -1,10 +1,13 @@
 import pandas as pd
 import numpy as np
 import datetime as dt
+import json
 import scipy.integrate as spi
 import scipy.optimize as spo
 import matplotlib.pyplot as plt
 from db import db_engine
+from utils import get_params
+
 
 
 # load actual hospitalization data for fitting
@@ -57,7 +60,15 @@ def get_deaths_by_age(fname):
     return df
 
 
-def get_vaccinations(engine, from_date=None, proj_to_date=None, proj_lookback=7, proj_fixed_rates=None, max_cumu=None, max_rate_per_remaining=1.0, realloc_priority=None, sql=open('sql/vaccinations_by_age_group.sql', 'r').read()):
+def get_vaccinations(engine, proj_params, from_date=None, proj_to_date=None, groupN=None, sql=open('sql/vaccinations_by_age_group.sql', 'r').read()):
+    proj_params = proj_params if type(proj_params) == dict else json.load(open(proj_params))
+    proj_lookback = proj_params['lookback'] if 'lookback' in proj_params.keys() else 7
+    proj_fixed_rates = proj_params['fixed_rates'] if 'fixed_rates' in proj_params.keys() else None
+    # max_cumu = {g: groupN[g] * proj_params['max_cumu'][g] for g in groupN.keys()}
+    max_cumu = proj_params['max_cumu'] if 'max_cumu' in proj_params.keys() else 0
+    max_rate_per_remaining = proj_params['max_rate_per_remaining'] if 'max_rate_per_remaining' in proj_params.keys() else 1.0
+    realloc_priority = proj_params['realloc_priority'] if 'realloc_priority' in proj_params.keys() else None
+
     df = pd.read_sql(sql, engine, index_col=['measure_date', 'group', 'vacc'])
 
     # left join from an empty dataframe to fill in gaps
@@ -91,7 +102,8 @@ def get_vaccinations(engine, from_date=None, proj_to_date=None, proj_lookback=7,
                     group = groups[i]
                     current_rate = df.loc[(d, group), 'rate'].sum()
                     if current_rate > 0:
-                        max_rate = max_rate_per_remaining * (max_cumu[group] - cumu_vacc[group])
+                        this_max_cumu = get_params(max_cumu, (d - from_date).days)
+                        max_rate = max_rate_per_remaining * (this_max_cumu[group] * groupN[group] - cumu_vacc[group])
                         percent_excess = max((current_rate - max_rate) / current_rate, 0)
                         for vacc in vaccs:
                             excess_rate = df.loc[(d, group, vacc), 'rate'] * percent_excess
@@ -108,6 +120,37 @@ def get_vaccinations_by_county(engine):
     sql = open('sql/vaccinations_by_age_by_county.sql', 'r').read()
     df = pd.read_sql(sql, engine)
     return df
+
+
+def get_corrected_emresource(fpath):
+    raw_hosps = pd.read_excel(fpath, 'COVID hospitalized_confirmed', engine='openpyxl', index_col='Resource facility name').drop(index='Grand Total').rename(columns=pd.to_datetime).stack()
+    raw_hosps.index = raw_hosps.index.set_names(['facility', 'date'])
+
+    raw_reports = pd.read_excel(fpath, 'Latest EMR update', engine='openpyxl', index_col='Resource facility name').drop(index='Grand Total').rename(columns=pd.to_datetime).stack()
+    raw_reports.index = raw_reports.index.set_names(['facility', 'date'])
+    raw_reports = pd.to_datetime(raw_reports).rename('last_report_date').sort_index()
+
+    print(raw_reports)
+    print(pd.to_datetime(pd.to_numeric(raw_reports).groupby('facility').rolling(20).agg(np.max)))
+
+
+# if __name__ == '__main__':
+#
+#
+#     # get_corrected_emresource('input/emresource.xlsx')
+#     engine = db_engine()
+#     get_vaccinations(engine)
+#
+#     proj_params = json.load(open('input/vacc_proj_params.json'))
+#     gparams = json.load(open('input/params.json'))
+#     get_vaccinations(engine
+#         , from_date = dt.date(2020, 1, 24)
+#         , proj_to_date = dt.date(2021, 12, 31)
+#         , proj_lookback = proj_params['lookback']
+#         , proj_fixed_rates = proj_params['fixed_rates'] if 'fixed_rates' in proj_params.keys() else None
+#         , max_cumu = {g: gparams['groupN'][g] * proj_params['max_cumu'][g] for g in ['0-19', '20-39', '40-64', '65+']}
+#         , max_rate_per_remaining = proj_params['max_rate_per_remaining']
+#         , realloc_priority = None)
 
 
 
