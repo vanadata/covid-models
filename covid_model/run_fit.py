@@ -55,7 +55,7 @@ def run():
     parser.add_argument("-f", "--fit_id", type=int, help="the fit_id for the last production fit, which will be used to set historical TC values for windows that will not be refit")
     fit_params = parser.parse_args()
     look_back = fit_params.look_back if fit_params.look_back is not None else 3
-    look_back_date = dt.datetime.strptime(fit_params.look_back_date, '%Y-%m-%d')
+    look_back_date = dt.datetime.strptime(fit_params.look_back_date, '%Y-%m-%d') if fit_params.look_back_date else None
     batch_size = fit_params.batch_size if fit_params.batch_size is not None else look_back
     fit_id = fit_params.fit_id if fit_params.fit_id is not None else 865
 

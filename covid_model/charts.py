@@ -124,7 +124,7 @@ def uq_tc(fit: CovidModelFit, sample_n=100, **plot_params):
     plt.ylabel('TCpb')
 
 # UQ sqaghetti plot
-def uq_spaghetti(fit, sample_n=100, tmax=600, **plot_params):
+def uq_spaghetti(fit, sample_n=100, tmax=600, tc_shift=0, **plot_params):
     # get sample TC values
     fitted_efs_dist = sps.multivariate_normal(mean=fit.fitted_efs, cov=fit.fitted_efs_cov)
     samples = fitted_efs_dist.rvs(sample_n)
@@ -135,7 +135,7 @@ def uq_spaghetti(fit, sample_n=100, tmax=600, **plot_params):
     model.prep()
     for i, sample_fitted_efs in enumerate(samples):
         print(i)
-        model.set_ef_by_t(list(fit.fixed_efs) + list(sample_fitted_efs) + [sample_fitted_efs[-1]])
+        model.set_ef_by_t(list(fit.fixed_efs) + list(sample_fitted_efs) + [sample_fitted_efs[-1] + tc_shift])
         model.solve_seir()
         plt.plot(model.daterange, model.total_hosps(), **{'color': 'darkblue', 'alpha': 0.025, **plot_params})
 
@@ -182,7 +182,8 @@ def r_equals_1(solved_model: CovidModel, t=None):
     # r_df = pd.DataFrame(data=r_matrix, index=tc_space, columns=vacc_immun_space)
 
     fig, ax = plt.subplots()
-    sns.heatmap(r_df, ax=ax, cmap='Spectral_r', center=1.0, xticklabels=50, yticklabels=50, vmax=3.0)
+    sns.heatmap(r_df, ax=ax, cmap='Spectral_r', center=1.0, xticklabels=50, yticklabels=50, vmax=3.0, cbar_kws={"ticks": [0.0, 1.0, 2.0, 3.0]})
+    fig.get_axes()[1].set_yticklabels(['Re = 0.0', 'Re = 1.0', 'Re = 2.0', 'Re = 3.0'])
     # sns.heatmap(r_df, ax=ax, cmap='bwr', center=1.0, xticklabels=50, yticklabels=50, vmax=3.0)
 
     # plot R = 1
@@ -207,21 +208,36 @@ def r_equals_1(solved_model: CovidModel, t=None):
     ax.grid(color='white')
 
 
+def vaccination(fname='output/daily_vaccination_by_age.csv', **plot_params):
+    df = pd.read_csv(fname, parse_dates=['measure_date']).set_index(['vacc_scen', 'group', 'measure_date'])
+    first_shot_rate = df.loc['current trajectory', 'first_shot_rate'].groupby('measure_date').sum().rolling(7).mean()
+    first_shot_rate.plot(**plot_params)
+
+
 if __name__ == '__main__':
     engine = db_engine()
 
     # model = CovidModel('input/params.json', [0, 700], engine=engine)
-    # model.set_ef_from_db(3770)
-
+    # model.set_ef_from_db(4095)
+    #
     # model.prep()
     # model.solve_seir()
     # actual_hosps(engine)
     # modeled(model, 'Ih')
     # plt.show()
 
-    # uq_spaghetti(CovidModelFit.from_db(engine, 3770), sample_n=200, tmax=650)
-    uq_tc(CovidModelFit.from_db(engine, 3770), sample_n=300)
+    # colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+    colors = ['tomato', 'royalblue', 'slategray']
+    fit = CovidModelFit.from_db(engine, 4371)
+    for i, tc_shift in enumerate([-0.10, 0.10, 0]):
+        uq_spaghetti(fit, sample_n=200, tmax=650, tc_shift=tc_shift, color=colors[i], alpha=0.05)
+    # uq_tc(CovidModelFit.from_db(engine, 3770), sample_n=300)
     plt.show()
+
+    # vaccination('output/daily_vaccination_by_age_old.csv', label='Old')
+    # vaccination(label='New')
+    # plt.legend(loc='best')
+    # plt.show()
 
     # model.prep(vacc_proj_scen='current trajectory')
     # model.solve_seir()

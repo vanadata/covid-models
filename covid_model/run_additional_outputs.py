@@ -20,14 +20,7 @@ if __name__ == '__main__':
     vacc_df_dict = {}
     for label, proj_params in proj_param_dict.items():
         print(f'Exporting vaccination by age for "{label}" scenario...')
-        df = get_vaccinations(engine
-                             , from_date=dt.datetime(2020, 1, 24)
-                             , proj_to_date=dt.datetime(2021, 12, 31)
-                             , proj_lookback=proj_params['lookback']
-                             , proj_fixed_rates=proj_params['fixed_rates'] if 'fixed_rates' in proj_params.keys() else None
-                             , max_cumu={g: gparams['groupN'][g] * proj_params['max_cumu'][g] for g in gparams['groupN'].keys()}
-                             , max_rate_per_remaining=proj_params['max_rate_per_remaining']
-                             , realloc_priority=proj_params['realloc_priority'])
+        df = get_vaccinations(engine, proj_params, from_date=dt.datetime(2020, 1, 24), proj_to_date=dt.datetime(2021, 12, 31), groupN=gparams['groupN'])
         vacc_df_dict[label] = df.groupby(['measure_date', 'group']).sum().rename(columns={'rate': 'first_shot_rate'})
         vacc_df_dict[label]['is_projected'] = vacc_df_dict[label]['is_projected'] > 0
 
