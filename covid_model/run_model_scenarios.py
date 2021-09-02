@@ -85,6 +85,7 @@ def main():
     vacc_projection_params = json.load(open('input/vacc_proj_params.json'))
     models_by_vacc_scen = {}
     models_with_increased_under20_inf_prob = {}
+    models_with_delayed_increased_under20_inf_prob = {}
     # models_for_custom_scenarios = {'incr. transm. under-18': {}, 'incr. transm. all': {}, 'delayed incr. transm. under-18': {}, 'delayed incr. transm. all': {}}
     for vacc_scen, proj_params in vacc_projection_params.items():
         print(f'Building {vacc_scen} projection...')
@@ -94,6 +95,9 @@ def main():
         models_with_increased_under20_inf_prob[vacc_scen] = CovidModel(params='input/params.json', tslices=[0, tmax], engine=engine)
         models_with_increased_under20_inf_prob[vacc_scen].gparams['rel_inf_prob'] = {'tslices': [577, 647], 'value': {'0-19': [1.0, 2.0, 2.0], '20-39': [1.0, 1.0, 1.0], '40-64': [1.0, 1.0, 1.0], '65+': [1.0, 1.0, 1.0]}}
         models_with_increased_under20_inf_prob[vacc_scen].prep(vacc_proj_scen=vacc_scen)
+        models_with_delayed_increased_under20_inf_prob[vacc_scen] = CovidModel(params='input/params.json', tslices=[0, tmax], engine=engine)
+        models_with_delayed_increased_under20_inf_prob[vacc_scen].gparams['rel_inf_prob'] = {'tslices': [577, 647], 'value': {'0-19': [1.0, 1.0, 2.0], '20-39': [1.0, 1.0, 1.0], '40-64': [1.0, 1.0, 1.0], '65+': [1.0, 1.0, 1.0]}}
+        models_with_delayed_increased_under20_inf_prob[vacc_scen].prep(vacc_proj_scen=vacc_scen)
         # models_for_custom_scenarios['incr. transm. under-18'] = CovidModel(params='input/params.json', tslices=[0, tmax], engine=engine)
         # models_by_vacc_scen[vacc_scen].write_vacc_to_csv(f'output/daily_vaccination_rates{"_with_lower_vacc_cap" if vacc_scen == "low vacc. uptake" else ""}.csv')
 
@@ -147,6 +151,7 @@ def main():
         tags = {'run_type': 'Vaccination Scenario', 'batch': batch, 'vacc_cap': vacc_scen}
         run_model(models_by_vacc_scen[vacc_scen], current_fit_id, fit_tags=tags)
         run_model(models_with_increased_under20_inf_prob[vacc_scen], current_fit_id, fit_tags={**tags, **{'tc_shift': 'increased under-18 transm.'}})
+        run_model(models_with_delayed_increased_under20_inf_prob[vacc_scen], current_fit_id, fit_tags={**tags, **{'tc_shift': 'delayed increased under-18 transm.'}})
 
     # tc shift scenarios
     for tcs in tc_shifts:
