@@ -50,13 +50,16 @@ def get_deaths(engine, min_date=dt.datetime(2020, 1, 24)):
     return df
 
 
-def get_deaths_by_age(fname):
-    raw = pd.read_csv(fname, parse_dates=['deathdate']).set_index('deathdate')
-    df = pd.DataFrame(index=raw.index)
-    for i, g in enumerate(['0-19', '20-39', '40-64', '65+']):
-        df[g] = raw[f'agedeaths{i+1}'].str.replace('.', '0').astype(int)
-    df = df.stack()
-    df.index = df.index.set_names(['measure_date', 'group'])
+def get_deaths_by_age(engine):
+    sql = """select
+        date::date as measure_date
+        , case when age_group in ('0-5', '6-11', '12-17', '18-19') then '0-19' else age_group end as "group"
+        , sum(count::int) as new_deaths
+    from cdphe.temp_covid19_county_summary
+    where count_type like 'deaths, %%' and date_type = 'date of death'
+    group by 1, 2
+    order by 1, 2"""
+    df = pd.read_sql(sql, engine, parse_dates=['measure_date']).set_index(['measure_date', 'group'])
     return df
 
 

@@ -8,7 +8,7 @@ from time import perf_counter
 import argparse
 
 
-def run_fit(engine, fit_id, look_back=3, batch_size=3, look_back_date=None, model_params='input/params.json', tags=None, fit_params={}):
+def run_fit(engine, fit_id, look_back=0, batch_size=0, look_back_date=None, tags=None, fit_params={}, **model_params):
     # load actual hospitalization data for fitting
     hosp_data = get_hosps(engine, dt.datetime(2020, 1, 24))
 
@@ -24,14 +24,14 @@ def run_fit(engine, fit_id, look_back=3, batch_size=3, look_back_date=None, mode
 
     # run fits
     tags = tags if tags is not None else {}
-    for i in range(len(tslices) - look_back, len(tslices) - batch_size + 1):
+    for i in range(len(tslices) - look_back, len(tslices) - min(batch_size, look_back) + 1):
         fit_type = 'final' if i == len(tslices) - batch_size else 'intermediate'
         fit = CovidModelFit(tslices=tslices[:(i + batch_size)], fixed_efs=efs[:(i-1)], actual_hosp=hosp_data
                             , fit_params={'efs0': (efs + [0.75]*999)[i:(i + batch_size)], **fit_params}
                             , tags={'fit_type': fit_type, **(tags if tags is not None else {})})
 
         t1_start = perf_counter()
-        fit.run(engine, model_params=model_params)
+        fit.run(engine, **model_params)
         t1_stop = perf_counter()
 
         print(f'Transmission control fitting completed in {t1_stop - t1_start} seconds.')
@@ -40,7 +40,7 @@ def run_fit(engine, fit_id, look_back=3, batch_size=3, look_back_date=None, mode
 
     # run model with best_efs
     fit.model.solve_seir()
-    print('t-slices: ', fit.model.tslices)
+    print('t-slices:', fit.model.tslices)
     print('TC by t-slice:', fit.efs)
 
     return fit_id, fit
@@ -53,14 +53,16 @@ def run():
     parser.add_argument("-lbd", "--look_back_date", type=str, help="the date (YYYY-MM-DD) from which we want to refit; default to using -lb, which defaults to 3")
     parser.add_argument("-bs", "--batch_size", type=int, help="the number of (14-day) windows to fit in each batch; default to running everything in one batch")
     parser.add_argument("-f", "--fit_id", type=int, help="the fit_id for the last production fit, which will be used to set historical TC values for windows that will not be refit")
+    parser.add_argument("-p", "--params", type=str, help="the path to the params file to use for fitting; default to 'input/params.json'")
     fit_params = parser.parse_args()
     look_back = fit_params.look_back if fit_params.look_back is not None else 3
     look_back_date = dt.datetime.strptime(fit_params.look_back_date, '%Y-%m-%d') if fit_params.look_back_date else None
     batch_size = fit_params.batch_size if fit_params.batch_size is not None else look_back
     fit_id = fit_params.fit_id if fit_params.fit_id is not None else 865
+    params = fit_params.params if fit_params.params is not None else 'input/params.json'
 
     engine = db_engine()
-    fit_id, fit = run_fit(engine, fit_id, look_back, batch_size, look_back_date=look_back_date, fit_params=vars(fit_params))
+    fit_id, fit = run_fit(engine, fit_id, look_back, batch_size, params=params, look_back_date=look_back_date, fit_params=vars(fit_params))
 
     actual_hosps(engine)
     total_hosps(fit.model)

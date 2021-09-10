@@ -62,6 +62,7 @@ def main():
     parser.add_argument("-pf", "--prior_fit_id", type=int, help="The prior fit ID (run last week)")
     parser.add_argument("-d", "--days", type=int, help="Number of days to include in these scenarios, starting from Jan 24, 2020")
     parser.add_argument("-tcs", "--tc_shifts", nargs='+', type=float, help="Upcoming shifts in TC to simulate (-0.05 represents a 5% reduction in TC)")
+    parser.add_argument("-p", "--params", type=str, help="the path to the params file to use for fitting; default to 'input/params.json'")
     # parser.add_argument("-pvs", "--primary_vaccine_scen", choices=['high', 'low'], type=float, help="The name of the vaccine scenario to be used for the default model scenario.")
     run_params = parser.parse_args()
 
@@ -70,6 +71,7 @@ def main():
     # set various parameters
     tmax = run_params.days if run_params.days is not None else 700
     primary_vacc_scen = 'current trajectory'
+    params_fname = run_params.params if run_params.params is not None else 'input/params.json'
     current_fit_id = run_params.current_fit_id if run_params.current_fit_id is not None else 1824
     prior_fit_id = run_params.prior_fit_id if run_params.prior_fit_id is not None else 1516
     tc_shifts = run_params.tc_shifts if run_params.tc_shifts is not None else [-0.05, -0.10]
@@ -82,20 +84,17 @@ def main():
     batch = 'standard_' + dt.datetime.now().strftime('%Y%m%d_%H%M%S')
 
     # create models for low- and high-vaccine-uptake scenarios
-    vacc_projection_params = json.load(open('input/vacc_proj_params.json'))
+    vacc_proj_dict = json.load(open('input/vacc_proj_params.json'))
+    increased_under20_inf_prob_alt_params = {'rel_inf_prob': {'tslices': [577, 647], 'value': {'0-19': [1.0, 2.0, 2.0], '20-39': [1.0, 1.0, 1.0], '40-64': [1.0, 1.0, 1.0], '65+': [1.0, 1.0, 1.0]}}}
     models_by_vacc_scen = {}
     models_with_increased_under20_inf_prob = {}
-    # models_for_custom_scenarios = {'incr. transm. under-18': {}, 'incr. transm. all': {}, 'delayed incr. transm. under-18': {}, 'delayed incr. transm. all': {}}
-    for vacc_scen, proj_params in vacc_projection_params.items():
+    for vacc_scen, proj_params in vacc_proj_dict.items():
+        vacc_proj_params = vacc_proj_dict[vacc_scen]
         print(f'Building {vacc_scen} projection...')
-        models_by_vacc_scen[vacc_scen] = CovidModel(params='input/params.json', tslices=[0, tmax], engine=engine)
-        # models_by_vacc_scen[vacc_scen].gparams['rel_inf_prob'] = {'tslices': [577, 647], 'value': {'0-19': [1.0, 1.0, 2.0], '20-39': [1.0, 1.0, 1.0], '40-64': [1.0, 1.0, 1.0], '65+': [1.0, 1.0, 1.0]}}
-        models_by_vacc_scen[vacc_scen].prep(vacc_proj_scen=vacc_scen)
-        models_with_increased_under20_inf_prob[vacc_scen] = CovidModel(params='input/params.json', tslices=[0, tmax], engine=engine)
-        models_with_increased_under20_inf_prob[vacc_scen].gparams['rel_inf_prob'] = {'tslices': [577, 647], 'value': {'0-19': [1.0, 2.0, 2.0], '20-39': [1.0, 1.0, 1.0], '40-64': [1.0, 1.0, 1.0], '65+': [1.0, 1.0, 1.0]}}
-        models_with_increased_under20_inf_prob[vacc_scen].prep(vacc_proj_scen=vacc_scen)
-        # models_for_custom_scenarios['incr. transm. under-18'] = CovidModel(params='input/params.json', tslices=[0, tmax], engine=engine)
-        # models_by_vacc_scen[vacc_scen].write_vacc_to_csv(f'output/daily_vaccination_rates{"_with_lower_vacc_cap" if vacc_scen == "low vacc. uptake" else ""}.csv')
+        models_by_vacc_scen[vacc_scen] = CovidModel(tslices=[0, tmax], engine=engine)
+        models_by_vacc_scen[vacc_scen].prep(params=params_fname, vacc_proj_params=vacc_proj_params)
+        # models_with_increased_under20_inf_prob[vacc_scen] = CovidModel(tslices=[0, tmax], engine=engine)
+        # models_with_increased_under20_inf_prob[vacc_scen].prep(vacc_proj_params=vacc_proj_params, params={**json.load(open(params_fname)), **increased_under20_inf_prob_alt_params})
 
     # run model scenarios
     print('Running scenarios...')
@@ -130,23 +129,16 @@ def main():
 
     # prior fit
     tags = {'run_type': 'Prior', 'batch': batch}
-    prior_fit_model = CovidModel(params='input/params.json', tslices=[0, tmax], engine=engine)
-    # prior_fit_model.gparams['immune_rate_A'] = 1.0
-    # prior_fit_model.gparams['immune_rate_I'] = 1.0
-    # prior_fit_model = CovidModel(params='input/params.json', tslices=[0, tmax], engine=engine)
-    # prior_fit_model.gparams.update({'delta_vacc_escape': 0.0})
-    # prior_fit_model.gparams['variants']['delta']['multipliers']['hosp'].update({"0-19": 2.52, "20-39": 2.52, "40-64": 2.52, "65+": 2.52})
-    # print(prior_fit_model.gparams['delta_vacc_escape'], models_by_vacc_scen['high vacc. uptake'].gparams['delta_vacc_escape'])
-    # print(prior_fit_model.gparams['variants']['delta']['multipliers']['hosp'], models_by_vacc_scen['high vacc. uptake'].gparams['variants']['delta']['multipliers']['hosp'])
+    prior_fit_model = CovidModel(tslices=[0, tmax], engine=engine)
 
-    prior_fit_model.prep(vacc_proj_scen=primary_vacc_scen)
+    prior_fit_model.prep(params=params_fname, vacc_proj_params=vacc_proj_dict[primary_vacc_scen])
     run_model(prior_fit_model, prior_fit_id, fit_tags=tags)
 
     # vacc cap scenarios
     for vacc_scen in models_by_vacc_scen.keys():
         tags = {'run_type': 'Vaccination Scenario', 'batch': batch, 'vacc_cap': vacc_scen}
         run_model(models_by_vacc_scen[vacc_scen], current_fit_id, fit_tags=tags)
-        run_model(models_with_increased_under20_inf_prob[vacc_scen], current_fit_id, fit_tags={**tags, **{'tc_shift': 'increased under-18 transm.'}})
+        # run_model(models_with_increased_under20_inf_prob[vacc_scen], current_fit_id, fit_tags={**tags, **{'tc_shift': 'increased under-18 transm.'}})
 
     # tc shift scenarios
     for tcs in tc_shifts:
@@ -157,7 +149,7 @@ def main():
                     tcsd_label += f' - {(tcsd + dt.timedelta(days=tc_shift_days)).strftime("%b %#d")}'
                 tags = {'run_type': 'TC Shift Projection', 'batch': batch, 'tc_shift': f'{int(100 * tcs)}%', 'tc_shift_date': tcsd_label, 'vacc_cap': vacc_scen}
                 run_model(models_by_vacc_scen[vacc_scen], current_fit_id, tc_shift=tcs, tc_shift_date=tcsd, fit_tags=tags, tc_shift_length=tc_shift_length)
-                run_model(models_with_increased_under20_inf_prob[vacc_scen], current_fit_id, tc_shift=tcs, tc_shift_date=tcsd, tc_shift_length=tc_shift_length, fit_tags={**tags, **{'tc_shift': tags['tc_shift'] + '; increased under-18 transm.'}})
+                # run_model(models_with_increased_under20_inf_prob[vacc_scen], current_fit_id, tc_shift=tcs, tc_shift_date=tcsd, tc_shift_length=tc_shift_length, fit_tags={**tags, **{'tc_shift': tags['tc_shift'] + '; increased under-18 transm.'}})
 
     # for vacc_scen in models_by_vacc_scen.keys():
     #     model = CovidModel(params='input/params.json', tslices=[0, tmax], engine=engine)
