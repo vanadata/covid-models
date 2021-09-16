@@ -7,7 +7,7 @@ import pyswarms as ps
 from sqlalchemy import MetaData
 from datetime import datetime
 import itertools
-from data_imports import get_vaccinations, get_hosps
+from data_imports import ExternalHosps, ExternalVacc
 from utils import *
 
 
@@ -174,38 +174,13 @@ class CovidModel:
         oef_by_t = self.obs_ef_by_t
         return [np.array([oef_by_t[t] for t in range(self.tslices[i], self.tslices[i+1])]).mean() for i in range(len(self.tslices) - 1)]
 
-    # def get_vacc_rates_by_t_from_db(self, lookback=7):
-    #     sql = f"""select
-    #         (extract(epoch from reporting_date - %s) / 60.0 / 60.0 / 24.0)::int as t
-    #         , count_type as "group"
-    #         , case date_type when 'vaccine dose 1/2' then 'mrna' when 'vaccine dose 1/1' then 'jnj' end as vacc
-    #         , sum(total_count) as rate
-    #     from cdphe.covid19_county_summary
-    #     where date_type like 'vaccine dose 1/_'
-    #     group by 1, 2, 3
-    #     order by 1, 2, 3
-    #     """
-    #     df = pd.read_sql(sql, self.engine, params=(self.datemin,), index_col=['t', 'group', 'vacc'])
-    #
-    #     # add projections
-    #     max_t = df.index.get_level_values('t').max()
-    #     if self.tmax > max_t:
-    #         # project rates based on the last 14 days of data
-    #         projected_rates = df.loc[max_t - (lookback-1):].groupby(['group', 'vacc']).sum() / float(lookback)
-    #         # used fixed value from params ('projected_rate'), if present
-    #         projected_rates['rate'] = pd.DataFrame({vacc: specs['projected_rate'] for vacc, specs in self.gparams['vaccines'].items() if 'projected_rate' in specs.keys()}).stack().combine_first(projected_rates['rate'])
-    #         # add projections to dataframe
-    #         projections = pd.concat([projected_rates.assign(t=t) for t in range(max_t + 1, self.tmax + 1)]).set_index('t', append=True).reorder_levels(['t', 'group', 'vacc'])
-    #         df = pd.concat([df, projections])
-    #
-    #     return df, max_t + 1
-
     # build dataframe containing vaccine first-dose rates by day by group by vaccine
     def set_vacc_rates(self, proj_params):
         proj_params_dict = proj_params if isinstance(proj_params, dict) else json.load(open(proj_params))
 
-        self.vacc_rate_df = get_vaccinations(self.engine, proj_params_dict, from_date=self.datemin, proj_to_date=self.daterange.max(), groupN=self.gparams['groupN'])
-        self.vacc_rate_df.index = self.vacc_rate_df.index.set_levels((self.vacc_rate_df.index.unique(0) - self.datemin).days, level=0).set_names('t', level=0)
+        # self.vacc_rate_df = get_vaccinations(self.engine, proj_params_dict, from_date=self.datemin, proj_to_date=self.daterange.max(), groupN=self.gparams['groupN'])
+        self.vacc_rate_df = ExternalVacc(self.engine, t0_date=self.datemin, fill_to_date=max(self.daterange)).fetch('input/past_and_projected_vaccinations.csv', proj_params=proj_params_dict, groupN=self.gparams['groupN'])
+        # self.vacc_rate_df.index = self.vacc_rate_df.index.set_levels((self.vacc_rate_df.index.unique(0) - self.datemin).days, level=0).set_names('t', level=0)
         self.vacc_rate_df['cumu'] = self.vacc_rate_df.groupby(['group', 'vacc'])['rate'].cumsum()
 
     # build dataframe containing the gain and loss of vaccine immunity by day by group
@@ -503,6 +478,10 @@ class CovidModel:
         df['fit_id'] = self.fit_id
         df['created_at'] = dt.datetime.now()
 
+        # add params
+        gparams_df = pd.DataFrame(self.gparams_lookup).unstack().rename_axis(index=['t', 'group']).rename("params").map(lambda d: json.dumps(d, ensure_ascii=False))
+        df = df.join(gparams_df, how='left')
+
         # write to database
         df.to_sql('covid_model_results'
                   , con=engine, schema='stage'
@@ -594,7 +573,7 @@ class CovidModelFit:
     # method = 'curve_fit' or 'minimize'
     def run(self, engine, method='curve_fit', **model_params):
         if self.actual_hosp is None:
-            self.actual_hosp = get_hosps(engine, self.tslices[0])
+            self.actual_hosp = ExternalHosps(engine, self.model.datemin).fetch('emresource_hosps.csv')
 
         self.model = CovidModel(tslices=self.tslices, efs=self.fixed_efs + self.fit_params['efs0'], engine=engine)
         self.model.prep(**model_params)
