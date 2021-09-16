@@ -27,12 +27,12 @@ class CovidModel:
     # the starting date of the model
     datemin = dt.datetime(2020, 1, 24)
 
-    def __init__(self, params, tslices, efs=None, fit_id=None, engine=None):
+    def __init__(self, tslices, efs=None, fit_id=None, engine=None):
         self.tslices = list(tslices)
 
         # build global parameters from params file, creating dict lookups for easy access
         self.engine = engine
-        self.gparams = params if type(params) == dict else json.load(open(params)) if params else None
+        self.gparams = None
         self.gparams_lookup = None
 
         # vaccines
@@ -56,19 +56,35 @@ class CovidModel:
         # used to connect up with the matching fit in the database
         self.fit_id = fit_id
 
-    def prep(self, vacc_proj_scen='current trajectory'):
-        vacc_proj_params = json.load(open('input/vacc_proj_params.json'))[vacc_proj_scen]
-        vacc_immun_params = json.load(open('input/vacc_immun_params.json'))
+    def prepped_duplicate(self):
+        new_model = CovidModel(self.tslices.copy(), efs=self.efs.copy(), fit_id=self.fit_id, engine=self.engine)
+        new_model.gparams = self.gparams.copy()
+        new_model.gparams_lookup = self.gparams_lookup.copy()
+        new_model.variant_prevalence_df = self.variant_prevalence_df.copy()
+        new_model.vacc_rate_df = self.vacc_rate_df.copy()
+        new_model.vacc_immun_df = self.vacc_immun_df.copy()
+        new_model.ef_by_t = self.ef_by_t.copy()
 
-        self.set_gparams(self.gparams)
+    # a model must be prepped before it can be run; if any params EXCEPT the efs (i.e. TC) change, it must be re-prepped
+    def prep(self, params=None, vacc_proj_params=None, vacc_immun_params='input/vacc_immun_params.json'):
+        # prep general parameters (gparams_lookup)
+        if self.gparams_lookup is None or params is not None:
+            self.set_gparams(params if params is not None else 'input/params.json')
+            # prep variants (self.variant_prevalence_df and updates to self.gparams_lookup)
+            if 'variants' in self.gparams and self.gparams['variants']:
+                self.set_variant_params(self.gparams['variants'])
 
-        if 'variants' in self.gparams and self.gparams['variants']:
-            self.set_variant_params(self.gparams['variants'])
+        # prep vacc rates, including projections (vacc_rate_df)
+        if self.vacc_rate_df is None or vacc_proj_params is not None:
+            self.set_vacc_rates(vacc_proj_params if vacc_proj_params is not None else json.load(open('input/vacc_proj_params.json'))['current trajectory'])
 
-        self.set_vacc_rates(vacc_proj_params)
-        self.set_vacc_immun(vacc_immun_params)
-        self.apply_vacc_multipliers(vacc_immun_params)
+        # prep vaccine immunity (vacc_immun_df and updates to self.gparams_lookup)
+        # vaccine immunity is dependent on gparams and vacc proj, so if anything has been re-prepped, vaccine immunity will need to be re-prepped
+        if self.vacc_immun_df is None or vacc_immun_params is not None or vacc_proj_params is not None or params is not None:
+            self.set_vacc_immun(vacc_immun_params if vacc_immun_params is not None else 'input/vacc_immun_params.json')
+            self.apply_vacc_multipliers(vacc_immun_params if vacc_immun_params is not None else 'input/vacc_immun_params.json')
 
+        # prep efs (ef_by_t)
         if self.efs is not None:
             self.set_ef_by_t(self.efs)
 
@@ -89,7 +105,8 @@ class CovidModel:
     @staticmethod
     def from_fit(conn, fit_id):
         fit = CovidModelFit.from_db(conn, fit_id)
-        model = CovidModel(params=fit.model_params, tslices=fit.tslices, engine=conn)
+        model = CovidModel(tslices=fit.tslices, engine=conn)
+        model.set_gparams(fit.model_params)
         model.set_ef_by_t(fit.efs)
 
         return model
@@ -123,6 +140,17 @@ class CovidModel:
     @property
     def solution_ydf_summed(self):
         return self.solution_ydf.groupby('t').sum()
+
+    @property
+    def solution_dydf(self):
+        gpdf = pd.DataFrame.from_dict(self.gparams_lookup, orient='index')
+        print(gpdf)
+        exit()
+        dydf = pd.DataFrame(index=self.solution_ydf.index)
+        dydf_yesterday = self.solution_ydf.groupby('group').shift(1)
+        # print(dydf_yesterday['Ih'].reset_index().apply(lambda x: print(x), axis=1)) #self.gparams_lookup[x.reset_index()['t']][x.reset_index()['group']]['lhos'], axis=1))
+        dydf['Ih'] = self.solution_ydf['Ih'] - dydf_yesterday['Ih'] + dydf_yesterday['Ih'] / dydf_yesterday['Ih'].apply(lambda x: self.gparams_lookup[x['t']][x['group']], axis=1)
+        return dydf
 
     # new exposures by day by group
     @property
@@ -174,16 +202,20 @@ class CovidModel:
 
     # build dataframe containing vaccine first-dose rates by day by group by vaccine
     def set_vacc_rates(self, proj_params):
-        self.vacc_rate_df = get_vaccinations(self.engine, proj_params, from_date=self.datemin, proj_to_date=self.daterange.max(), groupN=self.gparams['groupN'])
+        proj_params_dict = proj_params if isinstance(proj_params, dict) else json.load(open(proj_params))
+
+        self.vacc_rate_df = get_vaccinations(self.engine, proj_params_dict, from_date=self.datemin, proj_to_date=self.daterange.max(), groupN=self.gparams['groupN'])
         self.vacc_rate_df.index = self.vacc_rate_df.index.set_levels((self.vacc_rate_df.index.unique(0) - self.datemin).days, level=0).set_names('t', level=0)
         self.vacc_rate_df['cumu'] = self.vacc_rate_df.groupby(['group', 'vacc'])['rate'].cumsum()
 
     # build dataframe containing the gain and loss of vaccine immunity by day by group
     def set_vacc_immun(self, immun_params):
+        immun_params_dict = immun_params if isinstance(immun_params, dict) else json.load(open(immun_params))
+
         # set immunity gain and loss
         immun_gains = []
         immun_losses = []
-        for vacc, vacc_specs in immun_params.items():
+        for vacc, vacc_specs in immun_params_dict.items():
             immun_gains += [delay_specs['value'] * self.vacc_rate_df['rate'].xs(vacc, level='vacc', drop_level=False).groupby('group').shift(delay_specs['delay']) for delay_specs in vacc_specs['immun_gain']]
             immun_losses += [delay_specs['value'] * self.vacc_rate_df['rate'].xs(vacc, level='vacc', drop_level=False).groupby('group').shift(delay_specs['delay']) for delay_specs in vacc_specs['immun_loss']]
         self.vacc_immun_df = pd.DataFrame()
@@ -198,13 +230,15 @@ class CovidModel:
 
     # build dataframe of multipliers and apply them to pS, hosp, dh, and dnh
     def apply_vacc_multipliers(self, immun_params):
+        immun_params_dict = immun_params if isinstance(immun_params, dict) else json.load(open(immun_params))
+
         # build dataframe
         combined_mults = {}
         vacc_prevs = {}
         for t in self.trange:
             for g in self.groups:
                 mults, s_prevs = ([], [])
-                for vacc, vacc_specs in immun_params.items():
+                for vacc, vacc_specs in immun_params_dict.items():
                     for delay_specs in vacc_specs['multipliers']:
                         mult = delay_specs['value'].copy()
                         mult['rel_inf_prob'] += self.gparams['delta_vacc_escape'] * self.variant_prevalence_df.loc[(t, g, 'delta'), 'e_prev']
@@ -401,6 +435,7 @@ class CovidModel:
                 transm_per_susc=transm,
                 delta_share=self.variant_prevalence_df.loc[(t_int, group, 'delta'), 'e_prev'],
                 **params[group])
+                # **{**params[group], 'dnh': params[group]['dnh'] * max((1 + 0.001 * (ydf['Ih'].sum() - 1250)), 1)})
 
         return dy
 
@@ -413,7 +448,7 @@ class CovidModel:
             # everything else is 0, except...
             y += [0] * (len(self.vars) - 1)
         # ...we start with one infection in the first group
-        y[2] = 1
+        y[2] = 2
         return y
 
     # solve the diff eq using scipy.integrate.solve_ivp; put the solution in    self.solution_y (list) and self.solution_ydf (dataframe)
@@ -502,7 +537,7 @@ class CovidModelFit:
 
         # set fit params ef_min and ef_max
         if 'ef_min' not in self.fit_params.keys():
-            self.fit_params['ef_min'] = 0.3
+            self.fit_params['ef_min'] = 0.00
         if 'ef_max' not in self.fit_params.keys():
             self.fit_params['ef_max'] = 0.99
 
@@ -557,40 +592,41 @@ class CovidModelFit:
 
     # run an optimization to minimize the cost function using scipy.optimize.minimize()
     # method = 'curve_fit' or 'minimize'
-    def run(self, engine, method='curve_fit', model_params='input/params.json'):
+    def run(self, engine, method='curve_fit', **model_params):
         if self.actual_hosp is None:
             self.actual_hosp = get_hosps(engine, self.tslices[0])
 
-        self.model = CovidModel(params=model_params, tslices=self.tslices, efs=self.fixed_efs + self.fit_params['efs0'], engine=engine)
-        self.model.prep()
+        self.model = CovidModel(tslices=self.tslices, efs=self.fixed_efs + self.fit_params['efs0'], engine=engine)
+        self.model.prep(**model_params)
 
         # run fit
-        if method == 'curve_fit':
-            def func(trange, *efs):
-                return self.run_model_and_get_total_hosps(efs)
-            self.fitted_efs, self.fitted_efs_cov = spo.curve_fit(
-                f=func
-                , xdata=self.model.trange
-                , ydata=self.actual_hosp[:len(self.model.trange)]
-                , p0=self.fit_params['efs0']
-                , bounds=([self.fit_params['ef_min']] * self.fit_count, [self.fit_params['ef_max']] * self.fit_count))
-        elif method == 'minimize':
-            minimization_results = spo.minimize(
-                lambda x: self.cost(x)
-                , self.fit_params['efs0']
-                , method='L-BFGS-B'
-                , bounds=[(self.fit_params['ef_min'], self.fit_params['ef_max'])] * self.fit_count
-                , options=self.fit_params)
-            print(minimization_results)
-            self.fitted_efs = minimization_results.x
-        elif method == 'pswarm':
-            options = {'c1': 0.5, 'c2': 0.3, 'w': 0.9}
-            bounds = ([self.fit_params['ef_min']] * self.fit_count, [self.fit_params['ef_max']] * self.fit_count)
-            optimizer = ps.single.GlobalBestPSO(n_particles=self.fit_count * 2, dimensions=self.fit_count, bounds=bounds, options=options)
-            cost, self.fitted_efs = optimizer.optimize(self.ps_cost, iters=10)
-            print(self.fitted_efs)
+        if self.model.efs != self.fixed_efs:
+            if method == 'curve_fit':
+                def func(trange, *efs):
+                    return self.run_model_and_get_total_hosps(efs)
+                self.fitted_efs, self.fitted_efs_cov = spo.curve_fit(
+                    f=func
+                    , xdata=self.model.trange
+                    , ydata=self.actual_hosp[:len(self.model.trange)]
+                    , p0=self.fit_params['efs0']
+                    , bounds=([self.fit_params['ef_min']] * self.fit_count, [self.fit_params['ef_max']] * self.fit_count))
+            elif method == 'minimize':
+                minimization_results = spo.minimize(
+                    lambda x: self.cost(x)
+                    , self.fit_params['efs0']
+                    , method='L-BFGS-B'
+                    , bounds=[(self.fit_params['ef_min'], self.fit_params['ef_max'])] * self.fit_count
+                    , options=self.fit_params)
+                print(minimization_results)
+                self.fitted_efs = minimization_results.x
+            elif method == 'pswarm':
+                options = {'c1': 0.5, 'c2': 0.3, 'w': 0.9}
+                bounds = ([self.fit_params['ef_min']] * self.fit_count, [self.fit_params['ef_max']] * self.fit_count)
+                optimizer = ps.single.GlobalBestPSO(n_particles=self.fit_count * 2, dimensions=self.fit_count, bounds=bounds, options=options)
+                cost, self.fitted_efs = optimizer.optimize(self.ps_cost, iters=10)
+                print(self.fitted_efs)
 
-        self.model.set_ef_by_t(self.efs)
+            self.model.set_ef_by_t(self.efs)
 
     # write the fit as a single row to stage.covid_model_fits, describing the optimized ef values
     def write_to_db(self, engine):
@@ -612,6 +648,9 @@ class CovidModelFit:
 
         conn = engine.connect()
         result = conn.execute(stmt)
+
+        if self.model is not None:
+            self.model.fit_id = result.inserted_primary_key[0]
 
         return result.inserted_primary_key[0]
 

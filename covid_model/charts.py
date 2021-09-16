@@ -26,8 +26,8 @@ def actual_hosps_by_group(engine, fname, axs, **plot_params):
         ax.set_xlabel('')
 
 
-def actual_deaths_by_group(fname, axs, **plot_params):
-    df = get_deaths_by_age(fname)
+def actual_deaths_by_group(engine, axs, **plot_params):
+    df = get_deaths_by_age(engine)
     for g, ax in zip(CovidModel.groups, axs.flat):
         df.xs(g, level='group').plot(ax=ax, **{'label': f'Actual Deaths', **plot_params})
         ax.set_title(g)
@@ -61,9 +61,9 @@ def modeled(model, compartments, transform=lambda x: x, **plot_params):
     plt.plot(model.daterange, transform(model.solution_ydf_summed[compartments].sum(axis=1)), **plot_params)
 
 
-def modeled_by_group(model, axs, compartments='Ih', **plot_params):
+def modeled_by_group(model, axs, compartment='Ih', **plot_params):
     for g, ax in zip(model.groups, axs.flat):
-        ax.plot(model.daterange, model.solution_ydf.xs(g, level='group')[compartments].sum(axis=1), **{'c': 'blue', 'label': 'Modeled', **plot_params})
+        ax.plot(model.daterange, model.solution_ydf.xs(g, level='group')[compartment], **{'c': 'blue', 'label': 'Modeled', **plot_params})
         ax.set_title(g)
         ax.legend(loc='best')
         ax.set_xlabel('')
@@ -80,7 +80,7 @@ def re_estimates(model, **plot_params):
 def new_deaths_by_group(model, axs, **plot_params):
     deaths = model.solution_ydf['D'] - model.solution_ydf['D'].groupby('group').shift(1)
     for g, ax in zip(model.groups, axs.flat):
-        ax.plot(model.daterange, deaths.xs(g, level='group'), **{'c': 'blue', 'label': 'Modeled', **plot_params})
+        ax.plot(model.daterange, deaths.xs(g, level='group').shift(6), **{'c': 'blue', 'label': 'Modeled', **plot_params})
         ax.set_title(g)
         ax.legend(loc='best')
         ax.set_xlabel('')
@@ -105,9 +105,9 @@ def actual_vs_modeled_hosps_by_group(actual_hosp_fname, model, **plot_params):
     fig.tight_layout()
 
 
-def actual_vs_modeled_deaths_by_group(actual_deaths_fname, model, **plot_params):
+def actual_vs_modeled_deaths_by_group(engine, model, **plot_params):
     fig, axs = plt.subplots(2, 2)
-    actual_deaths_by_group(actual_deaths_fname, axs=axs, c='red', **plot_params)
+    actual_deaths_by_group(engine, axs=axs, c='red', **plot_params)
     new_deaths_by_group(model, axs=axs, c='blue', **plot_params)
     fig.tight_layout()
 
@@ -123,21 +123,52 @@ def uq_tc(fit: CovidModelFit, sample_n=100, **plot_params):
     plt.xlabel('t')
     plt.ylabel('TCpb')
 
+
 # UQ sqaghetti plot
-def uq_spaghetti(fit, sample_n=100, tmax=600, tc_shift=0, **plot_params):
+def uq_spaghetti(fit, sample_n=100, tmax=600,
+                 tc_shift=0, tc_shift_days=70, tc_shift_date=dt.date.today() + dt.timedelta(2) + dt.timedelta((6-dt.date.today().weekday()) % 7),
+                 compartments='Ih', **plot_params):
     # get sample TC values
     fitted_efs_dist = sps.multivariate_normal(mean=fit.fitted_efs, cov=fit.fitted_efs_cov)
     samples = fitted_efs_dist.rvs(sample_n)
 
     # for each sample, solve the model and add a line to the plot
-    model = CovidModel('input/params.json', fit.tslices, engine=engine)
+    model = CovidModel(fit.tslices, engine=engine)
     model.add_tslice(tmax, 0)
+    model.prep()
+    for i, sample_fitted_efs in enumerate(samples):
+        print(i)
+        # model = base_model.prepped_duplicate()
+        current_ef = sample_fitted_efs[-1]
+        if tc_shift_days is None:
+            model.set_ef_by_t(list(fit.fixed_efs) + list(sample_fitted_efs) + [current_ef + tc_shift])
+        else:
+            model.set_ef_by_t(list(fit.fixed_efs) + list(sample_fitted_efs) + [current_ef])
+            for i, tc_shift_for_this_day in enumerate(np.linspace(0, tc_shift, tc_shift_days)):
+                model.ef_by_t[(tc_shift_date - model.datemin.date()).days + i] += tc_shift_for_this_day
+            for t in range((tc_shift_date - model.datemin.date()).days + tc_shift_days, tmax):
+                model.ef_by_t[t] += tc_shift
+        # base_model.set_ef_by_t(list(fit.fixed_efs) + list(sample_fitted_efs) + [sample_fitted_efs[-1] + tc_shift])
+        model.solve_seir()
+        modeled(model, compartments=compartments, **{'color': 'darkblue', 'alpha': 0.025, **plot_params})
+        # plt.plot(model.daterange, model.total_hosps(), **{'color': 'darkblue', 'alpha': 0.025, **plot_params})
+
+# UQ histogram plot
+def uq_histogram(fit: CovidModelFit, sample_n=100, compartments='Ih', from_date=dt.datetime.now(), to_date=dt.datetime.now()+dt.timedelta(days=90)):
+    # get sample TC values
+    fitted_efs_dist = sps.multivariate_normal(mean=fit.fitted_efs, cov=fit.fitted_efs_cov)
+    samples = fitted_efs_dist.rvs(sample_n)
+
+    # for each sample, solve the model and add a line to the plot
+    model = CovidModel(fit.tslices, engine=engine)
+    model.add_tslice((to_date - model.datemin).days, 0)
     model.prep()
     for i, sample_fitted_efs in enumerate(samples):
         print(i)
         model.set_ef_by_t(list(fit.fixed_efs) + list(sample_fitted_efs) + [sample_fitted_efs[-1] + tc_shift])
         model.solve_seir()
-        plt.plot(model.daterange, model.total_hosps(), **{'color': 'darkblue', 'alpha': 0.025, **plot_params})
+        print(model.solution_dydf['Ih'])
+        exit()
 
 
 def tc_for_given_r_and_vacc(solved_model: CovidModel, t, r, vacc_share):
@@ -217,22 +248,42 @@ def vaccination(fname='output/daily_vaccination_by_age.csv', **plot_params):
 if __name__ == '__main__':
     engine = db_engine()
 
-    # model = CovidModel('input/params.json', [0, 700], engine=engine)
-    # model.set_ef_from_db(4095)
-    #
-    # model.prep()
+    # model = CovidModel([0, 700], engine=engine)
+    # model.set_ef_from_db(4898)
+    # model.efs[-1] = 1
+
+    # model.prep(params='input/proposed_params.json')
     # model.solve_seir()
-    # actual_hosps(engine)
     # modeled(model, 'Ih')
+    # actual_hosps(engine)
     # plt.show()
 
+    # actual_vs_modeled_hosps_by_group('input/hosps_by_group_20210611.csv', model)
+    # plt.show()
+    # exit()
+    #
+    # actual_vs_modeled_deaths_by_group(engine, model)
+    # plt.show()
+
+    fig, ax = plt.subplots()
+    plt.grid(color='lightgray')
     # colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
     colors = ['tomato', 'royalblue', 'slategray']
-    fit = CovidModelFit.from_db(engine, 4371)
+    fit = CovidModelFit.from_db(engine, 5028)
     for i, tc_shift in enumerate([-0.10, 0.10, 0]):
-        uq_spaghetti(fit, sample_n=200, tmax=650, tc_shift=tc_shift, color=colors[i], alpha=0.05)
-    # uq_tc(CovidModelFit.from_db(engine, 3770), sample_n=300)
+        uq_spaghetti(fit, sample_n=200, tmax=700, tc_shift=tc_shift, color=colors[i], alpha=0.05, compartments='Ih')
+        # uq_spaghetti(fit, sample_n=200, tmax=700, tc_shift=tc_shift, color=colors[i], alpha=0.05, compartments='D')
+        # uq_histogram(fit)
+        # exit()
+    locator = mdates.MonthLocator(interval=2)
+    formatter = mdates.ConciseDateFormatter(locator)
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(formatter)
+    ax.set_ylabel('Daily Patients Hospitalized with COVID-19')
+    # ax.set_ylabel('Cumulative Deaths from COVID-19')
     plt.show()
+
+    # uq_tc(CovidModelFit.from_db(engine, 4898), sample_n=10)
 
     # vaccination('output/daily_vaccination_by_age_old.csv', label='Old')
     # vaccination(label='New')
