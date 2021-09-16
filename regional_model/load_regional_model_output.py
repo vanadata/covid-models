@@ -14,6 +14,7 @@ def run():
     for fname in [lpha_fname, metro_fname]:
         dfs_by_region = pd.read_excel(os.path.join(dir, fname), engine='openpyxl', sheet_name=None)
         df = pd.concat(dfs_by_region).reset_index(level=1, drop=True).set_index('Date', append=True)
+        df['fit_date'] = dt.date(2021, int(fname[-9:-7]), int(fname[-7:-5]))
         dfs[fname.split('MobOutput')[0]] = df
 
     combined = pd.concat(dfs)
@@ -26,7 +27,8 @@ def run():
         , 'pImmune': 'immun_share'
         , 'PrevPer100000': 'prev_per_100k'
         , 'CumulativeInfToDate': 'cumu_inf'
-        , 'ReEstimate': 're'}
+        , 'ReEstimate': 're'
+        , 'fit_date': 'fit_date'}
     combined = combined.rename(columns=column_mapping)[column_mapping.values()]
     combined['fit_date'] = fit_date
 

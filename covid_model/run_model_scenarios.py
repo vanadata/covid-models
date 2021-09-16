@@ -77,10 +77,10 @@ def main():
     tc_shifts = run_params.tc_shifts if run_params.tc_shifts is not None else [-0.05, -0.10]
     next_friday = dt.date.today() + dt.timedelta(2) + dt.timedelta((6-dt.date.today().weekday()) % 7)
     # tc_shift_dates = [next_friday, next_friday + dt.timedelta(days=14), next_friday + dt.timedelta(days=28), dt.datetime(2021, 8, 15)]
-    tc_shift_dates = [next_friday]
+    tc_shift_dates = [dt.date.today() + dt.timedelta(days=-3)]
     tc_shift_dates = [dt.datetime.combine(d, dt.datetime.min.time()) for d in tc_shift_dates]
     tc_shift_length = None
-    tc_shift_days = 70
+    tc_shift_days = 56
     batch = 'standard_' + dt.datetime.now().strftime('%Y%m%d_%H%M%S')
 
     # create models for low- and high-vaccine-uptake scenarios
@@ -103,6 +103,8 @@ def main():
     def run_model(model, fit_id, fit_tags=None, tc_shift=None, tc_shift_date=None, tc_shift_length=None):
         print('Scenario tags: ', fit_tags)
         model.set_ef_from_db(fit_id)
+        if tc_shift_days is not None and tc_shift_date is not None:
+            model.tslices[-2] = min(model.tslices[-2], (tc_shift_date - model.datemin).days - 1)
         current_ef = model.efs[-1]
         if tc_shift is not None:
             if tc_shift_days is None:
