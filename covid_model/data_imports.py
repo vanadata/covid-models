@@ -61,7 +61,7 @@ class ExternalVacc(ExternalData):
 
             # add projections
             proj_from_date = df.index.get_level_values('measure_date').max() + dt.timedelta(days=1)
-            if self.fill_to_date >= proj_from_date:
+            if self.fill_to_date.date() >= proj_from_date:
                 proj_date_range = pd.date_range(proj_from_date, self.fill_to_date)
                 # project rates based on the last {proj_lookback} days of data
                 projected_rates = df.loc[(proj_from_date - dt.timedelta(days=proj_lookback)):].groupby(
@@ -98,6 +98,10 @@ class ExternalVacc(ExternalData):
                             cumu_vacc[group] += df.loc[(d, group), 'rate'].sum()
 
             return df
+
+
+class ExternalContactMatrices(ExternalData):
+    pass
 
 
 # load actual hospitalization data for fitting

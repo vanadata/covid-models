@@ -364,9 +364,11 @@ class CovidModel:
 
     # the diff eq for a single group; will be called four times in the actual diff eq
     @staticmethod
-    def single_group_seir(single_group_y, transm_per_susc, vacc_immun_gain, vacc_immun_loss, alpha, gamma, pS, hosp, hlos, dnh, dh, groupN, delta_vacc_escape, delta_share, immune_rate_I, immune_rate_A, dimmuneI=999999, dimmuneA=999999, **excess_args):
+    def single_group_seir(y, single_group_y, transm_per_susc, vacc_immun_gain, vacc_immun_loss, alpha, gamma, pS, hosp, hlos, dnh, dh, groupN, delta_vacc_escape, delta_share, immune_rate_I, immune_rate_A, dimmuneI=999999, dimmuneA=999999, **excess_args):
 
         S, E, I, Ih, A, R, RA, V, Vxd, D = single_group_y
+        # beta, ef, rel_inf_prob, lamb, N,
+        # transm_per_susc = beta * (1 - ef) * rel_inf_prob * (I_total * lamb + A_total) / N
 
         daily_vacc_per_elig = vacc_immun_gain / (groupN - V - Vxd - Ih - D)
 
@@ -406,6 +408,7 @@ class CovidModel:
         for group in self.groups:
             transm = CovidModel.daily_transmission_per_susc(ef, I_total=ydf['I'].sum(), A_total=ydf['A'].sum(), **params[group])
             dy += CovidModel.single_group_seir(
+                y=y,
                 single_group_y=list(ydf.loc[group, :]),
                 transm_per_susc=transm,
                 delta_share=self.variant_prevalence_df.loc[(t_int, group, 'delta'), 'e_prev'],
@@ -481,6 +484,7 @@ class CovidModel:
         # add params
         gparams_df = pd.DataFrame(self.gparams_lookup).unstack().rename_axis(index=['t', 'group']).rename("params").map(lambda d: json.dumps(d, ensure_ascii=False))
         df = df.join(gparams_df, how='left')
+        print(df['params'])
 
         # write to database
         df.to_sql('covid_model_results'
