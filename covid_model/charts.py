@@ -239,7 +239,7 @@ def r_equals_1(solved_model: CovidModel, t=None):
     ax.grid(color='white')
 
 
-def vaccination(fname='output/daily_vaccination_by_age.csv', **plot_params):
+def vaccination(fname='output/daily_vaccination_by_age (old).csv', **plot_params):
     df = pd.read_csv(fname, parse_dates=['measure_date']).set_index(['vacc_scen', 'group', 'measure_date'])
     first_shot_rate = df.loc['current trajectory', 'first_shot_rate'].groupby('measure_date').sum().rolling(7).mean()
     first_shot_rate.plot(**plot_params)
@@ -248,15 +248,17 @@ def vaccination(fname='output/daily_vaccination_by_age.csv', **plot_params):
 if __name__ == '__main__':
     engine = db_engine()
 
-    # model = CovidModel([0, 700], engine=engine)
-    # model.set_ef_from_db(4898)
+    model = CovidModel([0, 700], engine=engine)
+    model.set_ef_from_db(5324)
     # model.efs[-1] = 1
 
-    # model.prep(params='input/proposed_params.json')
-    # model.solve_seir()
-    # modeled(model, 'Ih')
-    # actual_hosps(engine)
-    # plt.show()
+    model.prep(params='input/params.json')
+    model.solve_seir()
+    model.write_to_db(engine)
+    modeled(model, 'Ih')
+    actual_hosps(engine)
+    plt.show()
+    exit()
 
     # actual_vs_modeled_hosps_by_group('input/hosps_by_group_20210611.csv', model)
     # plt.show()
@@ -269,9 +271,10 @@ if __name__ == '__main__':
     plt.grid(color='lightgray')
     # colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
     colors = ['tomato', 'royalblue', 'slategray']
-    fit = CovidModelFit.from_db(engine, 5028)
+    fit = CovidModelFit.from_db(engine, 5324)
     for i, tc_shift in enumerate([-0.10, 0.10, 0]):
-        uq_spaghetti(fit, sample_n=200, tmax=700, tc_shift=tc_shift, color=colors[i], alpha=0.05, compartments='Ih')
+        # uq_spaghetti(fit, sample_n=200, tmax=700, tc_shift=tc_shift, tc_shift_days=56, color=colors[i], alpha=0.05, compartments='Ih')
+        uq_spaghetti(fit, sample_n=200, tmax=700, tc_shift=tc_shift, tc_shift_days=56, color=colors[i], alpha=0.05, compartments='Ih')
         # uq_spaghetti(fit, sample_n=200, tmax=700, tc_shift=tc_shift, color=colors[i], alpha=0.05, compartments='D')
         # uq_histogram(fit)
         # exit()

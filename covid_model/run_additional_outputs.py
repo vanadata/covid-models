@@ -3,7 +3,7 @@ import numpy as np
 import datetime as dt
 import json
 from db import db_engine
-from data_imports import get_hosps_df, get_vaccinations_by_county, get_vaccinations
+from data_imports import get_hosps_df, get_vaccinations_by_county, ExternalVacc
 
 if __name__ == '__main__':
     engine = db_engine()
@@ -20,7 +20,8 @@ if __name__ == '__main__':
     vacc_df_dict = {}
     for label, proj_params in proj_param_dict.items():
         print(f'Exporting vaccination by age for "{label}" scenario...')
-        df = get_vaccinations(engine, proj_params, from_date=dt.datetime(2020, 1, 24), proj_to_date=dt.datetime(2021, 12, 31), groupN=gparams['groupN'])
+        df = ExternalVacc(engine, fill_to_date=dt.datetime(2021, 12, 31)).fetch('input/past_and_projected_vaccinations.csv', proj_params=proj_params, groupN=gparams['groupN'])
+        df['is_projected'] = df['is_projected'].fillna(False).astype(int)
         vacc_df_dict[label] = df.groupby(['measure_date', 'group']).sum().rename(columns={'rate': 'first_shot_rate'})
         vacc_df_dict[label]['is_projected'] = vacc_df_dict[label]['is_projected'] > 0
 
@@ -29,7 +30,7 @@ if __name__ == '__main__':
     vacc_df = vacc_df.join(pd.Series(gparams['groupN']).rename('population').rename_axis('group'))
     vacc_df['cumu_share_of_population'] = vacc_df['first_shot_cumu'] / vacc_df['population']
     vacc_df = vacc_df.join(vacc_df[~vacc_df['is_projected']]['first_shot_cumu'].groupby(['vacc_scen', 'group']).max().rename('current_first_shot_cumu'))
-    vacc_df.to_csv('output/daily_vaccination_by_age.csv')
+    vacc_df.to_csv('output/daily_vaccination_by_age.csv', float_format='%.15f')
 
     # export vaccination by county, without projections
     print('Exporting vaccination by county...')

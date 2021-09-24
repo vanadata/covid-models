@@ -80,7 +80,7 @@ def main():
     tc_shift_dates = [dt.date.today() + dt.timedelta(days=-3)]
     tc_shift_dates = [dt.datetime.combine(d, dt.datetime.min.time()) for d in tc_shift_dates]
     tc_shift_length = None
-    tc_shift_days = 56
+    tc_shift_dayss = [14, 56]
     batch = 'standard_' + dt.datetime.now().strftime('%Y%m%d_%H%M%S')
 
     # create models for low- and high-vaccine-uptake scenarios
@@ -100,7 +100,7 @@ def main():
     print('Running scenarios...')
     legacy_outputs = {}
 
-    def run_model(model, fit_id, fit_tags=None, tc_shift=None, tc_shift_date=None, tc_shift_length=None):
+    def run_model(model, fit_id, fit_tags=None, tc_shift=None, tc_shift_date=None, tc_shift_length=None, tc_shift_days=None):
         print('Scenario tags: ', fit_tags)
         model.set_ef_from_db(fit_id)
         if tc_shift_days is not None and tc_shift_date is not None:
@@ -146,12 +146,13 @@ def main():
     for tcs in tc_shifts:
         for tcsd in tc_shift_dates:
             for vacc_scen in models_by_vacc_scen.keys():
-                tcsd_label = tcsd.strftime("%b %#d")
-                if tc_shift_days is not None:
-                    tcsd_label += f' - {(tcsd + dt.timedelta(days=tc_shift_days)).strftime("%b %#d")}'
-                tags = {'run_type': 'TC Shift Projection', 'batch': batch, 'tc_shift': f'{int(100 * tcs)}%', 'tc_shift_date': tcsd_label, 'vacc_cap': vacc_scen}
-                run_model(models_by_vacc_scen[vacc_scen], current_fit_id, tc_shift=tcs, tc_shift_date=tcsd, fit_tags=tags, tc_shift_length=tc_shift_length)
-                # run_model(models_with_increased_under20_inf_prob[vacc_scen], current_fit_id, tc_shift=tcs, tc_shift_date=tcsd, tc_shift_length=tc_shift_length, fit_tags={**tags, **{'tc_shift': tags['tc_shift'] + '; increased under-18 transm.'}})
+                for tc_shift_days in tc_shift_dayss:
+                    tcsd_label = tcsd.strftime("%b %#d")
+                    if tc_shift_days is not None:
+                        tcsd_label += f' - {(tcsd + dt.timedelta(days=tc_shift_days)).strftime("%b %#d")}'
+                    tags = {'run_type': 'TC Shift Projection', 'batch': batch, 'tc_shift': f'{int(100 * tcs)}%', 'tc_shift_date': tcsd_label, 'vacc_cap': vacc_scen}
+                    run_model(models_by_vacc_scen[vacc_scen], current_fit_id, tc_shift=tcs, tc_shift_date=tcsd, fit_tags=tags, tc_shift_length=tc_shift_length, tc_shift_days=tc_shift_days)
+                    # run_model(models_with_increased_under20_inf_prob[vacc_scen], current_fit_id, tc_shift=tcs, tc_shift_date=tcsd, tc_shift_length=tc_shift_length, fit_tags={**tags, **{'tc_shift': tags['tc_shift'] + '; increased under-18 transm.'}})
 
     # for vacc_scen in models_by_vacc_scen.keys():
     #     model = CovidModel(params='input/params.json', tslices=[0, tmax], engine=engine)
