@@ -88,7 +88,6 @@ class CovidModel:
         if self.efs is not None:
             self.set_ef_by_t(self.efs)
 
-
     def set_ef_from_db(self, fit_id, extend=True):
         fit = CovidModelFit.from_db(self.engine, fit_id)
         tslices = fit.tslices
