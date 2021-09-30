@@ -9,12 +9,14 @@ from datetime import datetime
 import itertools
 from data_imports import ExternalHosps, ExternalVacc
 from utils import *
+from collections import OrderedDict
 
 
 # class used to run the model given a set of parameters, including transmission control (ef)
 class CovidModel:
     # the variables in the differential equation
-    vars = ['S', 'E', 'I', 'Ih', 'A', 'R', 'RA', 'V', 'Vxd', 'D']
+    # vars = ['S', 'E', 'I', 'Ih', 'A', 'R', 'RA', 'V', 'Vxd', 'D']
+    vars = ['S', 'E', 'I', 'Ih', 'A', 'R', 'RA', 'D']
     transitions = [
         ('s', 'e', 'rel_inf_prob'),
         ('e', 'i', 'pS'),
@@ -393,6 +395,7 @@ class CovidModel:
 
         return dS, dE, dI, dIh, dA, dR, dRA, dV, dVxd, dD
 
+
     # the differential equation, takes y, outputs dy
     def seir(self, t, y):
         ydf = CovidModel.y_to_df(y)
@@ -426,11 +429,12 @@ class CovidModel:
             y += [0] * (len(self.vars) - 1)
         # ...we start with one infection in the first group
         y[2] = 2
-        return y
+        # return y
+        return np.reshape(y, (len(self.groups), len(self.vars))).transpose().flatten()
 
     # solve the diff eq using scipy.integrate.solve_ivp; put the solution in    self.solution_y (list) and self.solution_ydf (dataframe)
-    def solve_seir(self):
-        self.solution = spi.solve_ivp(fun=self.seir, t_span=[self.tmin, self.tmax], y0=self.y0(), t_eval=range(self.tmin, self.tmax))
+    def solve_seir(self, seir=None):
+        self.solution = spi.solve_ivp(fun=self.seir if seir is None else seir, t_span=[self.tmin, self.tmax], y0=self.y0(), t_eval=range(self.tmin, self.tmax))
         if not self.solution.success:
             raise RuntimeError(f'ODE solver failed with message: {self.solution.message}')
         self.solution_y = np.transpose(self.solution.y)
@@ -575,6 +579,7 @@ class CovidModelFit:
     # run an optimization to minimize the cost function using scipy.optimize.minimize()
     # method = 'curve_fit' or 'minimize'
     def run(self, engine, method='curve_fit', **model_params):
+
         if self.actual_hosp is None:
             self.actual_hosp = ExternalHosps(engine, self.model.datemin).fetch('emresource_hosps.csv')
 
