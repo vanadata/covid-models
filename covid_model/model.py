@@ -17,7 +17,7 @@ from ode_builder import *
 class CovidModel(ODEBuilder):
     attr = OrderedDict({'seir': ['S', 'E', 'I', 'Ih', 'A', 'R', 'RA', 'D'],
                         'age': ['0-19', '20-39', '40-64', '65+'],
-                        'vacc': ['unvacc', 'mrna', 'jnj']})
+                        'vacc': ['unvacc', 'mrna', 'jnj', 'vacc_fail']})
 
     param_attr_names = ('age', 'vacc')
 
@@ -137,12 +137,14 @@ class CovidModel(ODEBuilder):
 
     def set_vacc_eff(self, vacc_eff_params):
         vacc_eff_params = vacc_eff_params if isinstance(vacc_eff_params, dict) else json.load(open(vacc_eff_params))
+        vacc_mults = {k: v['multipliers'] for k, v in vacc_eff_params.items()}
+        vacc_onsets = {k: v['onset'] for k, v in vacc_eff_params.items() if 'onset' in v.keys()}
 
         self.vacc_rate_df['eff_rate'] = 0
-        for vacc, eff_params in vacc_eff_params.items():
-            for delay, share_of_eff, prior_share_of_eff in zip(eff_params['onset']['tslices'],
-                                                               eff_params['onset']['value'],
-                                                               [0] + eff_params['onset']['value'][:-1]):
+        for vacc, onset in vacc_onsets.items():
+            for delay, share_of_eff, prior_share_of_eff in zip(onset['tslices'],
+                                                               onset['value'],
+                                                               [0] + onset['value'][:-1]):
                 delayed_vacc_rate = self.vacc_rate_df.xs(vacc, level='vacc', drop_level=False)['rate'].groupby(['age', 'vacc']).shift(delay).fillna(0)
                 self.vacc_rate_df['eff_rate'] += (share_of_eff - prior_share_of_eff) * pd.DataFrame(index=self.vacc_rate_df.index).join(delayed_vacc_rate, how='left')['rate'].fillna(0)
 
@@ -151,13 +153,14 @@ class CovidModel(ODEBuilder):
         self.vacc_rate_df['eff_unvacc'] = self.vacc_rate_df['age_group_pop'] - self.vacc_rate_df['eff_cumu'].groupby(['age', 'vacc']).shift(1).fillna(0)
         self.vacc_rate_df['eff_per_unvacc'] = self.vacc_rate_df['eff_rate'] / self.vacc_rate_df['eff_unvacc']
 
-        # add to gparams_lookup
-        self.set_param('vacc_eff', 0, attrs={'vacc': 'unvacc'})
         for t in self.trange:
             for age in self.attr['age']:
-                for vacc, eff_params in vacc_eff_params.items():
+                # add vaccination rates to params
+                for vacc in vacc_onsets.keys():
                     self.set_param(f'{vacc}_per_unvacc', self.vacc_rate_df.loc[(t, age, vacc), 'eff_per_unvacc'], {'age': age, 'vacc': 'unvacc'}, trange=[t])
-                    for param, mult in eff_params['multipliers'].items():
+                # apply multipliers to params
+                for vacc, param_mults in vacc_mults.items():
+                    for param, mult in param_mults.items():
                         self.params[t][(age, vacc)][param] *= mult
 
     def set_variant_params(self, variant_params):
@@ -246,8 +249,9 @@ class CovidModel(ODEBuilder):
         self.reset_ode()
         for age in self.attributes['age']:
             for seir in self.attributes['seir']:
-                self.add_flow((seir, age, 'unvacc'), (seir, age, 'mrna'), 'mrna_per_unvacc')
-                self.add_flow((seir, age, 'unvacc'), (seir, age, 'jnj'), 'jnj_per_unvacc')
+                # self.add_flow((seir, age, 'unvacc'), (seir, age, 'vacc_fail'), '(mrna_per_unvacc + jnj_per_unvacc) * vacc_fail_rate')
+                self.add_flow((seir, age, 'unvacc'), (seir, age, 'mrna'), 'mrna_per_unvacc * (1 - vacc_fail_rate)')
+                self.add_flow((seir, age, 'unvacc'), (seir, age, 'jnj'), 'jnj_per_unvacc * (1 - vacc_fail_rate)')
             for vacc in self.attributes['vacc']:
                 self.add_flow(('S', age, vacc), ('E', age, vacc),
                                'betta * (1 - ef) * (1 - vacc_eff) * lamb / total_pop',
@@ -372,6 +376,8 @@ class CovidModelFit:
     @staticmethod
     def from_db(conn, fit_id):
         df = pd.read_sql_query(f"select * from covid_model.fits where id = '{fit_id}'", con=conn, coerce_float=True)
+        if len(df) == 0:
+            raise ValueError(f'{fit_id} is not a valid fit ID.')
         fit_count = len(df['efs_cov'][0]) if df['efs_cov'][0] is not None else df['fit_params'][0]['fit_count']
         return CovidModelFit(
             tslices=df['tslices'][0]

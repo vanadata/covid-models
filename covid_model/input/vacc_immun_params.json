@@ -6,5 +6,11 @@
   "jnj": {
     "onset": {"tslices": [14, 28], "value": [0.91667, 1]},
     "multipliers": {"vacc_eff": 0.72, "pS": 0.5, "hosp": 0.5, "dnh": 0.5, "dh": 1}
+  },
+  "vacc_fail": {
+    "multipliers": {"vacc_eff": 0}
+  },
+  "unvacc": {
+    "multipliers": {"vacc_eff": 0}
   }
 }

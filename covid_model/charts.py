@@ -249,7 +249,7 @@ if __name__ == '__main__':
 
     model = CovidModel([0, 700], engine=engine)
     # model.set_ef_from_db(5324)
-    model.set_ef_from_db(5495)
+    model.set_ef_from_db(0)
     # model.efs[-1] = 1
 
     model.prep(params='input/params.json')
@@ -257,9 +257,6 @@ if __name__ == '__main__':
     model.solve_seir()
     t1 = perf_counter()
     print(f'Solved ODE in {t1 - t0} seconds.')
-    from run_model_scenarios import build_legacy_output_df
-    print(build_legacy_output_df(model))
-    exit()
     model.write_to_db(engine)
     modeled(model, 'Ih')
     actual_hosps(engine)
