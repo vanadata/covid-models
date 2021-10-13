@@ -1,7 +1,7 @@
 from db import db_engine
 from model import CovidModelFit, CovidModel
 from data_imports import get_hosps
-from charts import actual_hosps, total_hosps
+from charts import actual_hosps, modeled
 import matplotlib.pyplot as plt
 import datetime as dt
 from time import perf_counter
@@ -39,9 +39,13 @@ def run_fit(engine, fit_id, look_back=0, batch_size=0, look_back_date=None, tags
         fit_id = fit.write_to_db(engine)
 
     # run model with best_efs
+    # print(fit.model.params[30])
+    # fit.model.prep(**model_params)
+    # print(fit.model.params[30])
+    # exit()
     fit.model.solve_seir()
     print('t-slices:', fit.model.tslices)
-    print('TC by t-slice:', fit.efs)
+    print('TC by t-slice:', fit.model.efs)
 
     return fit_id, fit
 
@@ -65,52 +69,8 @@ def run():
     fit_id, fit = run_fit(engine, fit_id, look_back, batch_size, params=params, look_back_date=look_back_date, fit_params=vars(fit_params))
 
     actual_hosps(engine)
-    total_hosps(fit.model)
+    modeled(fit.model, 'Ih')
     plt.show()
-
-    # actual_hosps(engine)
-    #
-    # fit1 = CovidModelFit.from_db(conn=engine, fit_id=fit_id)
-    # model1 = CovidModel(fit1.model_params, [0, 600], engine=engine)
-    # model1.set_ef_from_db(fit_id)
-    # model1.prep()
-    # model1.solve_seir()
-    # total_hosps(model1)
-
-    # plt.show()
-
-    # load actual hospitalization data for fitting
-    # engine = db_engine()
-    # hosp_data = get_hosps(engine, dt.datetime(2020, 1, 24))
-    #
-    # # fetch external parameters to use for tslices and fixed efs
-    # fit = CovidModelFit.from_db(engine, fit_id)
-    # tslices = [int(x) for x in fit.tslices[:-3]]
-    # tslices += list(range(tslices[-1] + 14, len(hosp_data) - 1 - 13, 14)) + [len(hosp_data)]
-    #
-    # fit_count = fitted_tc_count
-    # fixed_efs = [float(x) for x in fit.efs[:(len(tslices) - 1 - fit_count)]]
-    #
-    # # run fits
-    # for i in range(len(tslices) - fit_count, len(tslices) - batch_size + 1):
-    #     fit = CovidModelFit(tslices=tslices[:(i+batch_size)], fixed_efs=fixed_efs.copy(), actual_hosp=hosp_data, fit_params=vars(fit_params))
-    #
-    #     t1_start = perf_counter()
-    #     fit.run(engine)
-    #     t1_stop = perf_counter()
-    #     print(f'Transmission control fitting completed in {t1_stop - t1_start} seconds.')
-    #     fixed_efs.append(fit.efs[i - 1])
-    #     fit.write_to_db(engine)
-    #
-    # # run model with best_efs, and plot total hosps
-    # fit.model.solve_seir()
-    # print('t-slices: ', fit.model.tslices)
-    # print('TC by t-slice:', fit.efs)
-    # fit.model.write_to_db(db_engine())
-    #
-    # actual_hosps(engine)
-    # total_hosps(fit.model)
-    # plt.show()
 
 
 if __name__ == '__main__':

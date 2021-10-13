@@ -10,6 +10,7 @@ import seaborn as sns
 import datetime as dt
 import numpy as np
 import pandas as pd
+from time import perf_counter
 
 
 def actual_hosps(engine, **plot_params):
@@ -58,7 +59,7 @@ def total_hosps(model, group=None, **plot_params):
 def modeled(model, compartments, transform=lambda x: x, **plot_params):
     if type(compartments) == str:
         compartments = [compartments]
-    plt.plot(model.daterange, transform(model.solution_ydf_summed[compartments].sum(axis=1)), **plot_params)
+    plt.plot(model.daterange, transform(model.solution_sum('seir')[compartments].sum(axis=1)), **{'c': 'blue', **plot_params})
 
 
 def modeled_by_group(model, axs, compartment='Ih', **plot_params):
@@ -167,8 +168,6 @@ def uq_histogram(fit: CovidModelFit, sample_n=100, compartments='Ih', from_date=
         print(i)
         model.set_ef_by_t(list(fit.fixed_efs) + list(sample_fitted_efs) + [sample_fitted_efs[-1] + tc_shift])
         model.solve_seir()
-        print(model.solution_dydf['Ih'])
-        exit()
 
 
 def tc_for_given_r_and_vacc(solved_model: CovidModel, t, r, vacc_share):
@@ -249,11 +248,18 @@ if __name__ == '__main__':
     engine = db_engine()
 
     model = CovidModel([0, 700], engine=engine)
-    model.set_ef_from_db(5324)
+    # model.set_ef_from_db(5324)
+    model.set_ef_from_db(5495)
     # model.efs[-1] = 1
 
     model.prep(params='input/params.json')
+    t0 = perf_counter()
     model.solve_seir()
+    t1 = perf_counter()
+    print(f'Solved ODE in {t1 - t0} seconds.')
+    from run_model_scenarios import build_legacy_output_df
+    print(build_legacy_output_df(model))
+    exit()
     model.write_to_db(engine)
     modeled(model, 'Ih')
     actual_hosps(engine)
@@ -271,7 +277,8 @@ if __name__ == '__main__':
     plt.grid(color='lightgray')
     # colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
     colors = ['tomato', 'royalblue', 'slategray']
-    fit = CovidModelFit.from_db(engine, 5324)
+    # fit = CovidModelFit.from_db(engine, 5324)
+    fit = CovidModelFit.from_db(engine, 5457)
     for i, tc_shift in enumerate([-0.10, 0.10, 0]):
         # uq_spaghetti(fit, sample_n=200, tmax=700, tc_shift=tc_shift, tc_shift_days=56, color=colors[i], alpha=0.05, compartments='Ih')
         uq_spaghetti(fit, sample_n=200, tmax=700, tc_shift=tc_shift, tc_shift_days=56, color=colors[i], alpha=0.05, compartments='Ih')
