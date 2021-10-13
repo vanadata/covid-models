@@ -5,7 +5,7 @@ select
 	    when age >= 20 and age <= 39 then '20-39'
 	    when age >= 40 and age <= 64 then '40-64'
 	    when age >= 65 then '65+'
-	end as "group"
+	end as "age"
 	, vacc
     , coalesce(round(case
     	when vacc = 'mrna' then sum(v.first_dose_rate - v.jnj_dose_rate)
