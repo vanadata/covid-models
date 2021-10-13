@@ -8,31 +8,27 @@ import argparse
 
 
 def build_legacy_output_df(model: CovidModel):
-    ydf = model.solution_ydf
+    ydf = model.solution_sum(['seir', 'age']).stack(level='age')
     dfs_by_group = []
-    for i, group in enumerate(model.groups):
-        dfs_by_group.append(ydf.xs(group, level='group').rename(columns={var: var + str(i+1) for var in model.vars}))
+    for i, group in enumerate(model.attr['age']):
+        dfs_by_group.append(ydf.xs(group, level='age').rename(columns={var: var + str(i+1) for var in model.attr['seir']}))
     df = pd.concat(dfs_by_group, axis=1)
 
-    totals = model.solution_ydf_summed
+    totals = model.solution_sum('seir')
+    vacc = model.solution_sum('vacc')
     df['Iht'] = totals['Ih']
     df['Dt'] = totals['D']
     df['Rt'] = totals['R'] + totals['RA']
     df['Itotal'] = totals['I'] + totals['A']
     df['Etotal'] = totals['E']
-    df['Einc'] = df['Etotal'] / model.gparams['alpha']
-    df['Vt'] = totals['V'] + totals['Vxd']
-    # for i, group in enumerate(model.groups):
-    #     group_df = ydf.xs(group, level='group')
-    #     df[f'vacel{i}'] = (group_df['S'] + group_df['R'] + group_df['A']) / (model.gparams['groupN'][group] - (group_df['V'] + group_df['Ih'] + group_df['D']))
-    df['immune'] = totals['R'] + totals['RA'] + totals['V'] + totals['Vxd']
-    df['immune4'] = ydf.xs('65+', level='group')['R'] + ydf.xs('65+', level='group')['RA'] + ydf.xs('65+', level='group')['V'] + ydf.xs('65+', level='group')['Vxd']
+    df['Einc'] = df['Etotal'] / model.raw_params['alpha']
+    df['Vt'] = vacc['mrna'] * model.params[0][('65+', 'mrna')]['vacc_eff'] + vacc['jnj'] * model.params[0][('65+', 'jnj')]['vacc_eff']
+    df['immune'] = totals['R'] + totals['RA'] + df['Vt']
     df['date'] = model.daterange
     df['Ilag'] = totals['I'].shift(3)
     df['Re'] = model.re_estimates
-    df['prev'] = 100000.0 * df['Itotal'] / model.gparams['N']
-    df['oneinX'] = model.gparams['N'] / df['Itotal']
-    df['pimmune'] = 100.0 * df['Einc'].cumsum() / model.gparams['N']
+    df['prev'] = 100000.0 * df['Itotal'] / model.raw_params['total_pop']
+    df['oneinX'] = model.raw_params['total_pop'] / df['Itotal']
     df['Exposed'] = 100.0 * df['Einc'].cumsum()
 
     df.index.names = ['t']
@@ -75,8 +71,7 @@ def main():
     current_fit_id = run_params.current_fit_id if run_params.current_fit_id is not None else 1824
     prior_fit_id = run_params.prior_fit_id if run_params.prior_fit_id is not None else 1516
     tc_shifts = run_params.tc_shifts if run_params.tc_shifts is not None else [-0.05, -0.10]
-    next_friday = dt.date.today() + dt.timedelta(2) + dt.timedelta((6-dt.date.today().weekday()) % 7)
-    # tc_shift_dates = [next_friday, next_friday + dt.timedelta(days=14), next_friday + dt.timedelta(days=28), dt.datetime(2021, 8, 15)]
+
     tc_shift_dates = [dt.date.today() + dt.timedelta(days=-3)]
     tc_shift_dates = [dt.datetime.combine(d, dt.datetime.min.time()) for d in tc_shift_dates]
     tc_shift_length = None
@@ -85,16 +80,13 @@ def main():
 
     # create models for low- and high-vaccine-uptake scenarios
     vacc_proj_dict = json.load(open('input/vacc_proj_params.json'))
-    increased_under20_inf_prob_alt_params = {'rel_inf_prob': {'tslices': [577, 647], 'value': {'0-19': [1.0, 2.0, 2.0], '20-39': [1.0, 1.0, 1.0], '40-64': [1.0, 1.0, 1.0], '65+': [1.0, 1.0, 1.0]}}}
     models_by_vacc_scen = {}
-    models_with_increased_under20_inf_prob = {}
     for vacc_scen, proj_params in vacc_proj_dict.items():
         vacc_proj_params = vacc_proj_dict[vacc_scen]
         print(f'Building {vacc_scen} projection...')
         models_by_vacc_scen[vacc_scen] = CovidModel(tslices=[0, tmax], engine=engine)
+        models_by_vacc_scen[vacc_scen].set_ef_from_db(current_fit_id)
         models_by_vacc_scen[vacc_scen].prep(params=params_fname, vacc_proj_params=vacc_proj_params)
-        # models_with_increased_under20_inf_prob[vacc_scen] = CovidModel(tslices=[0, tmax], engine=engine)
-        # models_with_increased_under20_inf_prob[vacc_scen].prep(vacc_proj_params=vacc_proj_params, params={**json.load(open(params_fname)), **increased_under20_inf_prob_alt_params})
 
     # run model scenarios
     print('Running scenarios...')
@@ -130,11 +122,11 @@ def main():
     build_tc_df(models_by_vacc_scen[primary_vacc_scen]).to_csv('output/tc_over_time.csv', index=False)
 
     # prior fit
-    tags = {'run_type': 'Prior', 'batch': batch}
-    prior_fit_model = CovidModel(tslices=[0, tmax], engine=engine)
+    # tags = {'run_type': 'Prior', 'batch': batch}
+    # prior_fit_model = CovidModel(tslices=[0, tmax], engine=engine)
 
-    prior_fit_model.prep(params=params_fname, vacc_proj_params=vacc_proj_dict[primary_vacc_scen])
-    run_model(prior_fit_model, prior_fit_id, fit_tags=tags)
+    # prior_fit_model.prep(params=params_fname, vacc_proj_params=vacc_proj_dict[primary_vacc_scen])
+    # run_model(prior_fit_model, prior_fit_id, fit_tags=tags)
 
     # vacc cap scenarios
     for vacc_scen in models_by_vacc_scen.keys():

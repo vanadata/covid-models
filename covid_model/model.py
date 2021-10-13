@@ -9,31 +9,28 @@ from datetime import datetime
 import itertools
 from data_imports import ExternalHosps, ExternalVacc
 from utils import *
+from collections import OrderedDict
+from ode_builder import *
 
 
 # class used to run the model given a set of parameters, including transmission control (ef)
-class CovidModel:
-    # the variables in the differential equation
-    vars = ['S', 'E', 'I', 'Ih', 'A', 'R', 'RA', 'V', 'Vxd', 'D']
-    transitions = [
-        ('s', 'e', 'rel_inf_prob'),
-        ('e', 'i', 'pS'),
-        ('i', 'h', 'hosp'),
-        ('i', 'd', 'dnh'),
-        ('h', 'd', 'dh')]
+class CovidModel(ODEBuilder):
+    attr = OrderedDict({'seir': ['S', 'E', 'I', 'Ih', 'A', 'R', 'RA', 'D'],
+                        'age': ['0-19', '20-39', '40-64', '65+'],
+                        'vacc': ['unvacc', 'mrna', 'jnj']})
 
-    groups = ['0-19', '20-39', '40-64', '65+']
+    param_attr_names = ('age', 'vacc')
 
     # the starting date of the model
     datemin = dt.datetime(2020, 1, 24)
 
-    def __init__(self, tslices, efs=None, fit_id=None, engine=None):
+    def __init__(self, tslices, efs=None, fit_id=None, engine=None, **ode_builder_args):
+        ODEBuilder.__init__(self, trange=range(max(tslices)), attributes=self.attr, param_attr_names=self.param_attr_names)
         self.tslices = list(tslices)
 
         # build global parameters from params file, creating dict lookups for easy access
         self.engine = engine
-        self.gparams = None
-        self.gparams_lookup = None
+        self.raw_params = None
 
         # vaccines
         self.vacc_rate_df = None
@@ -56,37 +53,26 @@ class CovidModel:
         # used to connect up with the matching fit in the database
         self.fit_id = fit_id
 
-    def prepped_duplicate(self):
-        new_model = CovidModel(self.tslices.copy(), efs=self.efs.copy(), fit_id=self.fit_id, engine=self.engine)
-        new_model.gparams = self.gparams.copy()
-        new_model.gparams_lookup = self.gparams_lookup.copy()
-        new_model.variant_prevalence_df = self.variant_prevalence_df.copy()
-        new_model.vacc_rate_df = self.vacc_rate_df.copy()
-        new_model.vacc_immun_df = self.vacc_immun_df.copy()
-        new_model.ef_by_t = self.ef_by_t.copy()
-
     # a model must be prepped before it can be run; if any params EXCEPT the efs (i.e. TC) change, it must be re-prepped
-    def prep(self, params=None, vacc_proj_params=None, vacc_immun_params='input/vacc_immun_params.json'):
+    def prep(self, params='input/params.json', vacc_proj_params='input/vacc_proj_params.json', vacc_immun_params='input/vacc_immun_params.json'):
         # prep general parameters (gparams_lookup)
-        if self.gparams_lookup is None or params is not None:
-            self.set_gparams(params if params is not None else 'input/params.json')
+        if self.params is None or params is not None:
+            self.set_params_from_file(params if params is not None else 'input/params.json')
             # prep variants (self.variant_prevalence_df and updates to self.gparams_lookup)
-            if 'variants' in self.gparams and self.gparams['variants']:
-                self.set_variant_params(self.gparams['variants'])
 
         # prep vacc rates, including projections (vacc_rate_df)
         if self.vacc_rate_df is None or vacc_proj_params is not None:
             self.set_vacc_rates(vacc_proj_params if vacc_proj_params is not None else json.load(open('input/vacc_proj_params.json'))['current trajectory'])
-
-        # prep vaccine immunity (vacc_immun_df and updates to self.gparams_lookup)
-        # vaccine immunity is dependent on gparams and vacc proj, so if anything has been re-prepped, vaccine immunity will need to be re-prepped
-        if self.vacc_immun_df is None or vacc_immun_params is not None or vacc_proj_params is not None or params is not None:
-            self.set_vacc_immun(vacc_immun_params if vacc_immun_params is not None else 'input/vacc_immun_params.json')
-            self.apply_vacc_multipliers(vacc_immun_params if vacc_immun_params is not None else 'input/vacc_immun_params.json')
+            self.set_vacc_eff(vacc_immun_params if vacc_immun_params is not None else json.load(open('input/vacc_immun_params.json')))
+            if 'variants' in self.raw_params and self.raw_params['variants']:
+                self.set_variant_params(self.raw_params['variants'])
 
         # prep efs (ef_by_t)
-        if self.efs is not None:
+        if self.ef_by_t is None:
             self.set_ef_by_t(self.efs)
+
+        # build ODE
+        self.build_ode()
 
     def set_ef_from_db(self, fit_id, extend=True):
         fit = CovidModelFit.from_db(self.engine, fit_id)
@@ -105,22 +91,10 @@ class CovidModel:
     def from_fit(conn, fit_id):
         fit = CovidModelFit.from_db(conn, fit_id)
         model = CovidModel(tslices=fit.tslices, engine=conn)
-        model.set_gparams(fit.model_params)
+        model.set_params_from_file(fit.model_params)
         model.set_ef_by_t(fit.efs)
 
         return model
-
-    # coerce a "y", a list of length (num of vars)*(num of groups), into a dataframe with dims (num of groups)x(num of vars)
-    @classmethod
-    def y_to_df(cls, y):
-        return pd.DataFrame(np.array(y).reshape(len(cls.groups), len(cls.vars)), columns=cls.vars, index=cls.groups)
-
-    @property
-    def solution_ydf(self):
-        df = self.solution_ydf_full.copy()
-        # df['V'] = df['V'] + df['Vxd']
-        # df = df.drop(columns='Vxd')
-        return df
 
     # handy properties for the beginning t, end t, and the full range of t values
     @property
@@ -130,43 +104,24 @@ class CovidModel:
     def tmax(self): return self.tslices[-1]
 
     @property
-    def trange(self): return range(self.tmin, self.tmax)
-
-    @property
     def daterange(self): return pd.date_range(self.datemin, periods=len(self.trange))
-
-    # sum the solution vars to create a single df with total values across all groups
-    @property
-    def solution_ydf_summed(self):
-        return self.solution_ydf.groupby('t').sum()
-
-    @property
-    def solution_dydf(self):
-        gpdf = pd.DataFrame.from_dict(self.gparams_lookup, orient='index')
-        print(gpdf)
-        exit()
-        dydf = pd.DataFrame(index=self.solution_ydf.index)
-        dydf_yesterday = self.solution_ydf.groupby('group').shift(1)
-        # print(dydf_yesterday['Ih'].reset_index().apply(lambda x: print(x), axis=1)) #self.gparams_lookup[x.reset_index()['t']][x.reset_index()['group']]['lhos'], axis=1))
-        dydf['Ih'] = self.solution_ydf['Ih'] - dydf_yesterday['Ih'] + dydf_yesterday['Ih'] / dydf_yesterday['Ih'].apply(lambda x: self.gparams_lookup[x['t']][x['group']], axis=1)
-        return dydf
 
     # new exposures by day by group
     @property
     def new_exposures(self):
-        return self.solution_ydf['E'] / self.gparams['alpha']
+        return self.solution_sum('seir')['E'] / self.raw_params['alpha']
 
     # estimated reproduction number (length of infection * new_exposures / current_infections
     @property
     def re_estimates(self):
-        infect_duration = 1 / self.gparams['gamma']
-        infected = self.solution_ydf['I'].groupby('t').sum().shift(3)
+        infect_duration = 1 / self.raw_params['gamm']
+        infected = self.solution_sum('seir')['I'].shift(3)
         return infect_duration * self.new_exposures.groupby('t').sum() / infected
 
     # calc the observed TC by applying the variant multiplier to the base TC
     @property
     def obs_ef_by_t(self):
-        return {t: sum(1 - (1 - self.ef_by_t[t]) * self.gparams_lookup[t][group]['rel_inf_prob'] for group in self.groups) / len(self.groups) for t in self.trange}
+        return {t: sum(1 - (1 - self.ef_by_t[t]) * self.params[t][pcmpt]['betta'] / self.raw_params['betta'] for pcmpt in self.param_compartments) / len(self.param_compartments) for t in self.trange}
 
     @property
     def obs_ef_by_slice(self):
@@ -177,73 +132,33 @@ class CovidModel:
     def set_vacc_rates(self, proj_params):
         proj_params_dict = proj_params if isinstance(proj_params, dict) else json.load(open(proj_params))
 
-        # self.vacc_rate_df = get_vaccinations(self.engine, proj_params_dict, from_date=self.datemin, proj_to_date=self.daterange.max(), groupN=self.gparams['groupN'])
-        self.vacc_rate_df = ExternalVacc(self.engine, t0_date=self.datemin, fill_to_date=max(self.daterange)).fetch('input/past_and_projected_vaccinations.csv', proj_params=proj_params_dict, groupN=self.gparams['groupN'])
-        # self.vacc_rate_df.index = self.vacc_rate_df.index.set_levels((self.vacc_rate_df.index.unique(0) - self.datemin).days, level=0).set_names('t', level=0)
-        self.vacc_rate_df['cumu'] = self.vacc_rate_df.groupby(['group', 'vacc'])['rate'].cumsum()
+        self.vacc_rate_df = ExternalVacc(self.engine, t0_date=self.datemin, fill_to_date=max(self.daterange)).fetch('input/past_and_projected_vaccinations.csv', proj_params=proj_params_dict, group_pop=self.raw_params['group_pop'])
+        self.vacc_rate_df['cumu'] = self.vacc_rate_df.groupby(['age', 'vacc'])['rate'].cumsum()
 
-    # build dataframe containing the gain and loss of vaccine immunity by day by group
-    def set_vacc_immun(self, immun_params):
-        immun_params_dict = immun_params if isinstance(immun_params, dict) else json.load(open(immun_params))
+    def set_vacc_eff(self, vacc_eff_params):
+        vacc_eff_params = vacc_eff_params if isinstance(vacc_eff_params, dict) else json.load(open(vacc_eff_params))
 
-        # set immunity gain and loss
-        immun_gains = []
-        immun_losses = []
-        for vacc, vacc_specs in immun_params_dict.items():
-            immun_gains += [delay_specs['value'] * self.vacc_rate_df['rate'].xs(vacc, level='vacc', drop_level=False).groupby('group').shift(delay_specs['delay']) for delay_specs in vacc_specs['immun_gain']]
-            immun_losses += [delay_specs['value'] * self.vacc_rate_df['rate'].xs(vacc, level='vacc', drop_level=False).groupby('group').shift(delay_specs['delay']) for delay_specs in vacc_specs['immun_loss']]
-        self.vacc_immun_df = pd.DataFrame()
-        self.vacc_immun_df['immun_gain'] = pd.concat(immun_gains).fillna(0).groupby(['t', 'group']).sum().sort_index()
-        self.vacc_immun_df['immun_loss'] = pd.concat(immun_losses).fillna(0).groupby(['t', 'group']).sum().sort_index()
+        self.vacc_rate_df['eff_rate'] = 0
+        for vacc, eff_params in vacc_eff_params.items():
+            for delay, share_of_eff, prior_share_of_eff in zip(eff_params['onset']['tslices'],
+                                                               eff_params['onset']['value'],
+                                                               [0] + eff_params['onset']['value'][:-1]):
+                delayed_vacc_rate = self.vacc_rate_df.xs(vacc, level='vacc', drop_level=False)['rate'].groupby(['age', 'vacc']).shift(delay).fillna(0)
+                self.vacc_rate_df['eff_rate'] += (share_of_eff - prior_share_of_eff) * pd.DataFrame(index=self.vacc_rate_df.index).join(delayed_vacc_rate, how='left')['rate'].fillna(0)
+
+        self.vacc_rate_df['eff_cumu'] = self.vacc_rate_df['eff_rate'].groupby(['age', 'vacc']).cumsum()
+        self.vacc_rate_df['age_group_pop'] = self.vacc_rate_df.index.get_level_values('age').to_series(index=self.vacc_rate_df.index).replace(self.raw_params['group_pop'])
+        self.vacc_rate_df['eff_unvacc'] = self.vacc_rate_df['age_group_pop'] - self.vacc_rate_df['eff_cumu'].groupby(['age', 'vacc']).shift(1).fillna(0)
+        self.vacc_rate_df['eff_per_unvacc'] = self.vacc_rate_df['eff_rate'] / self.vacc_rate_df['eff_unvacc']
 
         # add to gparams_lookup
+        self.set_param('vacc_eff', 0, attrs={'vacc': 'unvacc'})
         for t in self.trange:
-            for group in self.groups:
-                for param in ['immun_gain', 'immun_loss']:
-                    self.gparams_lookup[t][group][f'vacc_{param}'] = self.vacc_immun_df.loc[(t, group), param]
-
-    # build dataframe of multipliers and apply them to pS, hosp, dh, and dnh
-    def apply_vacc_multipliers(self, immun_params):
-        immun_params_dict = immun_params if isinstance(immun_params, dict) else json.load(open(immun_params))
-
-        # build dataframe
-        combined_mults = {}
-        vacc_prevs = {}
-        for t in self.trange:
-            for g in self.groups:
-                mults, s_prevs = ([], [])
-                for vacc, vacc_specs in immun_params_dict.items():
-                    for delay_specs in vacc_specs['multipliers']:
-                        mult = delay_specs['value'].copy()
-                        mult['rel_inf_prob'] += self.gparams['delta_vacc_escape'] * self.variant_prevalence_df.loc[(t, g, 'delta'), 'e_prev']
-                        mults.append(mult)
-                        s_prevs.append(self.vacc_rate_df.loc[(max(t - delay_specs['delay'], 0), g, vacc), 'cumu'] / self.gparams['groupN'][g])
-                combined_mults[(t, g)], vacc_prevs[(t, g)] = calc_multiple_multipliers(self.transitions, mults, s_prevs)
-
-        # create a dataframe of the multipliers for each transition param; drop rel_inf_prob because we're handling that through immun_gain and immun_loss
-        self.vacc_trans_mults_df = pd.DataFrame.from_dict(combined_mults, orient='index').drop(columns='rel_inf_prob')
-        self.vacc_trans_mults_df.index.rename(['t', 'group'], inplace=True)
-
-        # create a dataframe of the estimated vaccine prevalence for individuals ENTERING each bucket
-        # for deaths, this definitely needs to averaged over history, since people stay dead a long time
-        self.vacc_prevalence_df = pd.DataFrame.from_dict(vacc_prevs, orient='index')
-
-        # for every transition except s -> e, multiply the transition param by the vacc mult
-        params = self.vacc_trans_mults_df.columns
-        for t in self.trange:
-            for group in self.groups:
-                for param in params:
-                    self.gparams_lookup[t][group][param] *= self.vacc_trans_mults_df.loc[(t, group), param]
-
-    def write_vacc_to_csv(self, fname):
-        df = pd.DataFrame()
-        df['first_shot_rate'] = self.vacc_rate_df['rate'].groupby(['t', 'group']).sum().fillna(0)
-        df = df.join(self.vacc_immun_df)
-        df = df.join(self.vacc_trans_mults_df.rename(columns={col: f'{col}_mult' for col in self.vacc_trans_mults_df.columns}))
-        df['first_shot_cumu'] = df['first_shot_rate'].groupby('group').cumsum()
-        df['jnj_first_shot_rate'] = self.vacc_rate_df['rate'].xs('jnj', level='vacc')
-        df['mrna_first_shot_rate'] = self.vacc_rate_df['rate'].xs('mrna', level='vacc')
-        df.to_csv(fname)
+            for age in self.attr['age']:
+                for vacc, eff_params in vacc_eff_params.items():
+                    self.set_param(f'{vacc}_per_unvacc', self.vacc_rate_df.loc[(t, age, vacc), 'eff_per_unvacc'], {'age': age, 'vacc': 'unvacc'}, trange=[t])
+                    for param, mult in eff_params['multipliers'].items():
+                        self.params[t][(age, vacc)][param] *= mult
 
     def set_variant_params(self, variant_params):
         dfs = {}
@@ -252,94 +167,64 @@ class CovidModel:
             var_df = var_df.rename(columns={specs['theta_column']: variant})[['t', variant]].set_index('t').rename(columns={variant: 'e_prev'}).astype(float)  # get rid of all columns except t (the index) and the prev value
             if 't_min' in specs.keys():
                 var_df['e_prev'].loc[:specs['t_min']] = 0
-            mult_df = pd.DataFrame(specs['multipliers'], index=self.groups).rename(columns={col: f'{col}_mult' for col in specs['multipliers'].keys()})
-            mult_df.index = mult_df.index.rename('group')
-            combined = pd.MultiIndex.from_product([var_df.index, mult_df.index], names=['t', 'group']).to_frame().join(var_df).join(mult_df).drop(columns=['t', 'group'])  # cross join
+            mult_df = pd.DataFrame(specs['multipliers'], index=self.attr['age']).rename(columns={col: f'{col}' for col in specs['multipliers'].keys()})
+            mult_df.index = mult_df.index.rename('age')
+            combined = pd.MultiIndex.from_product([var_df.index, mult_df.index], names=['t', 'age']).to_frame().join(var_df).join(mult_df).drop(columns=['t', 'age'])  # cross join
             dfs[variant] = combined
         df = pd.concat(dfs)
-        df.index = df.index.set_names(['variant', 't', 'group']).reorder_levels(['t', 'group', 'variant'])
-        df = df.sort_index()
+        df.index = df.index.set_names(['variant', 't', 'age']).reorder_levels(['t', 'age', 'variant'])
+        df = df.sort_index().fillna(1)
+
 
         # fill in future variant prevalence by duplicating the last row
         variant_input_tmax = df.index.get_level_values('t').max()
         if variant_input_tmax < self.tmax:
-            # projections = pd.concat({(t, group): df[(variant_input_tmax, group)] for t, group in itertools.product(range(variant_input_tmax + 1), self.groups)})
             projections = pd.concat({t: df.loc[variant_input_tmax] for t in range(variant_input_tmax + 1, self.tmax)})
             df = pd.concat([df, projections]).sort_index()
 
-        # calculate multipliers; run s -> e separately, because we're setting the same variant prevalences in S and E
-        df['s_prev'] = df['e_prev']
-        df = self.calc_multipliers(df, start_at=0, end_at=0)
-        df = self.calc_multipliers(df, start_at=1, add_remaining=False)
-        sums = df.groupby(['t', 'group']).sum()
-        variant_tmin = sums.index.get_level_values('t').min()
-        variant_tmax = sums.index.get_level_values('t').max()
-        for t in self.trange:
-            if t >= variant_tmin:
-                for fr, to, label in self.transitions:
-                    for group in self.groups:
-                        # if t is greater than variant_tmax, just pull the multiplier at variant_tmax
-                        self.gparams_lookup[t][group][label] *= sums.loc[(min(t, variant_tmax), group), f'{label}_flow']
-                    if len(set(self.gparams_lookup[t][g][label] for g in self.groups)) == 1:
-                        self.gparams_lookup[t][None][label] = self.gparams_lookup[t][self.groups[0]][label]
+        # apply multipliers
+        wildtype_prevalences = 1 - df['e_prev'].groupby(['t', 'age']).sum()
+        agg_multipliers = df.apply(lambda s: s*df['e_prev']).groupby(['t', 'age']).sum().apply(lambda s: s + 1 * wildtype_prevalences)
+
+        for col in agg_multipliers.columns:
+            if col != 'e_prev':
+                for t, age in agg_multipliers.index.values:
+                    if t in self.trange:
+                        for vacc in self.attr['vacc']:
+                            self.params[t][(age, vacc)][col] *= agg_multipliers.loc[(t, age), col]
 
         self.variant_prevalence_df = df
 
-    # provide a dataframe with [compartment]_prev as the initial prevalence and this function will add the flows necessary to calc the downstream multipliers
-    def calc_multipliers(self, df, start_at=0, end_at=10, add_remaining=True):
-        if add_remaining:
-            remaining = (1.0 - df[[f'{self.transitions[start_at][0]}_prev']].groupby(['t', 'group']).sum())
-            remaining['vacc'] = 'none'
-            remaining['shot'] = 'none'
-            remaining = remaining.set_index(['vacc', 'shot'], append=True)
-            df = df.append(remaining)
-        df = df.sort_index()
-        mult_cols = [col for col in df.columns if col[-5:] == '_mult']
-        df[mult_cols] = df[mult_cols].fillna(1.0)
-        for fr, to, label in self.transitions[start_at:(end_at+1)]:
-            df[f'{label}_flow'] = df[f'{fr}_prev'] * df[f'{label}_mult']
-            df[f'{to}_prev'] = df[f'{label}_flow'] / df[f'{label}_flow'].groupby(['t', 'group']).transform(sum)
-        return df
-
-    def set_generic_gparams(self, gparams):
-        gparams_by_t = {t: get_params(gparams, t) for t in self.trange}
-        for t in self.trange:
-            for group in self.groups:
-                # set "temp" to 1; if there is no "temp_on" parameter or temp_on == False, it will be 1
-                self.gparams_lookup[t][group]['temp'] = 1
-                self.gparams_lookup[t][group]['rel_inf_prob'] = 1.0
-                for k, v in gparams_by_t[t].items():
-                    # vaccines and variants are handled separately, so skip
-                    if k in ['vaccines', 'variants']:
-                        pass
-                    # special rules for the "temp" paramater, which is set dynamically based on t
-                    elif k == 'temp_on':
-                        if v:
-                            self.gparams_lookup[t][group]['temp'] = 0.5 * math.cos((t + 45) * 0.017) + 1.5
-                    # for all other cases, if it's a dictionary, it should be broken out by group
-                    elif type(v) == dict:
-                        self.gparams_lookup[t][group][k] = v[group]
-                    # if it's not a dict, it should be a single value: just assign that value to all groups
-                    else:
-                        self.gparams_lookup[t][group][k] = v
-            # if all groups have the same value, create a None entry for that param
-            self.gparams_lookup[t][None] = dict()
-            for k, v in self.gparams_lookup[t][self.groups[0]].items():
-                if type(v) != dict and len(set(self.gparams_lookup[t][g][k] for g in self.groups)) == 1:
-                    self.gparams_lookup[t][None][k] = v
+    def set_param_using_age_dict(self, name, val, trange=None):
+        if not isinstance(val, dict):
+            self.set_param(name, val, trange=trange)
+        else:
+            for age, v in val.items():
+                self.set_param(name, v, attrs={'age': age}, trange=trange)
 
     # set global parameters and lookup dicts
-    def set_gparams(self, params):
-        # load gparams
-        self.gparams = params if type(params) == dict else json.load(open(params))
-        self.gparams_lookup = {t: {g: dict() for g in self.groups} for t in self.trange}
-        # build a dictionary of gparams for every (t, group) for convenient access
-        self.set_generic_gparams(self.gparams)
+    def set_params_from_file(self, params):
+        self.raw_params = params if type(params) == dict else json.load(open(params))
+        for name, val in self.raw_params.items():
+            if name != 'variants':
+                if not isinstance(val, dict) or 'tslices' not in val.keys():
+                    self.set_param_using_age_dict(name, val)
+                else:
+                    for i, (tmin, tmax) in enumerate(zip([self.tmin] + val['tslices'], val['tslices'] + [self.tmax])):
+                        v = {a: av[i] for a, av in val['value'].items()} if isinstance(val['value'], dict) else val['value'][i]
+                        self.set_param_using_age_dict(name, v, trange=range(tmin, tmax))
 
     # set ef by slice and lookup dicts
     def set_ef_by_t(self, ef_by_slice):
         self.efs = ef_by_slice
         self.ef_by_t = {t: get_value_from_slices(self.tslices, list(ef_by_slice), t) for t in self.trange}
+        for tmin, tmax, ef in zip(self.tslices[:-1], self.tslices[1:], self.efs):
+            self.set_param('ef', ef, trange=range(tmin, tmax))
+
+        # the ODE needs to be rebuilt with the new TC values
+        # it would be good to refactor the ODEBuilder to support fittable parameters that are easier to adjust cheaply
+        if len(self.terms) > 0:
+            self.rebuild_ode_with_new_tc()
 
     # extend the time range with an additional slice; should maybe change how this works to return a new CovidModel instead
     def add_tslice(self, t, ef=None):
@@ -356,94 +241,66 @@ class CovidModel:
             self.set_ef_by_t(self.efs)
         self.fit_id = None
 
-    # this is the rate of flow from S -> E, based on beta, current prevalence, TC, variants, and a bunch of paramaters that should probably be deprecated
-    @staticmethod
-    def daily_transmission_per_susc(ef, I_total, A_total, rel_inf_prob, N, beta, temp, mask, lamb, siI, ramp, **excess_args):
-        return beta * (1 - ef) * rel_inf_prob * (I_total * lamb + A_total) / N
+    # build ODE
+    def build_ode(self):
+        self.reset_ode()
+        for age in self.attributes['age']:
+            for seir in self.attributes['seir']:
+                self.add_flow((seir, age, 'unvacc'), (seir, age, 'mrna'), 'mrna_per_unvacc')
+                self.add_flow((seir, age, 'unvacc'), (seir, age, 'jnj'), 'jnj_per_unvacc')
+            for vacc in self.attributes['vacc']:
+                self.add_flow(('S', age, vacc), ('E', age, vacc),
+                               'betta * (1 - ef) * (1 - vacc_eff) * lamb / total_pop',
+                               scale_by_cmpts=[('I', a, v) for a in self.attributes['age'] for v in self.attributes['vacc']])
+                self.add_flow(('S', age, vacc), ('E', age, vacc),
+                               'betta * (1 - ef) * (1 - vacc_eff) / total_pop',
+                               scale_by_cmpts=[('A', a, v) for a in self.attributes['age'] for v in self.attributes['vacc']])
+                self.add_flow(('E', age, vacc), ('I', age, vacc), '1 / alpha * pS')
+                self.add_flow(('E', age, vacc), ('A', age, vacc), '1 / alpha * (1 - pS)')
+                self.add_flow(('I', age, vacc), ('Ih', age, vacc), 'gamm * hosp')
+                self.add_flow(('I', age, vacc), ('D', age, vacc), 'gamm * dnh')
+                self.add_flow(('I', age, vacc), ('R', age, vacc), 'gamm * (1 - hosp - dnh) * immune_rate_I')
+                self.add_flow(('I', age, vacc), ('S', age, vacc), 'gamm * (1 - hosp - dnh) * (1 - immune_rate_I)')
+                self.add_flow(('A', age, vacc), ('RA', age, vacc), 'gamm * immune_rate_A')
+                self.add_flow(('A', age, vacc), ('S', age, vacc), 'gamm * (1 - immune_rate_A)')
+                self.add_flow(('Ih', age, vacc), ('D', age, vacc), '1 / hlos * dh')
+                self.add_flow(('Ih', age, vacc), ('R', age, vacc), '1 / hlos * (1 - dh) * immune_rate_I')
+                self.add_flow(('Ih', age, vacc), ('S', age, vacc), '1 / hlos * (1 - dh) * (1 - immune_rate_I)')
+                self.add_flow(('R', age, vacc), ('S', age, vacc), '1 / dimmuneI')
+                self.add_flow(('RA', age, vacc), ('S', age, vacc), '1 / dimmuneA')
 
-    # the diff eq for a single group; will be called four times in the actual diff eq
-    @staticmethod
-    def single_group_seir(y, single_group_y, transm_per_susc, vacc_immun_gain, vacc_immun_loss, alpha, gamma, pS, hosp, hlos, dnh, dh, groupN, delta_vacc_escape, delta_share, immune_rate_I, immune_rate_A, dimmuneI=999999, dimmuneA=999999, **excess_args):
+    # reset terms that depend on TC; this takes about 0.08 sec, while rebuilding the whole ODE takes ~0.90 sec
+    def rebuild_ode_with_new_tc(self):
+        self.reset_terms({'seir': 'S'}, {'seir': 'E'})
+        for age in self.attributes['age']:
+            for vacc in self.attributes['vacc']:
+                self.add_flow(('S', age, vacc), ('E', age, vacc),
+                              'betta * (1 - ef) * (1 - vacc_eff) * lamb / total_pop',
+                              scale_by_cmpts=[('I', a, v) for a in self.attributes['age'] for v in self.attributes['vacc']])
+                self.add_flow(('S', age, vacc), ('E', age, vacc),
+                              'betta * (1 - ef) * (1 - vacc_eff) / total_pop',
+                              scale_by_cmpts=[('A', a, v) for a in self.attributes['age'] for v in self.attributes['vacc']])
 
-        S, E, I, Ih, A, R, RA, V, Vxd, D = single_group_y
-        # beta, ef, rel_inf_prob, lamb, N,
-        # transm_per_susc = beta * (1 - ef) * rel_inf_prob * (I_total * lamb + A_total) / N
+    # define initial state y0
+    @property
+    def y0_dict(self):
+        y0d = {('S', age, 'unvacc'): n for age, n in self.raw_params['group_pop'].items()}
+        y0d[('I', '40-64', 'unvacc')] = 2
+        y0d[('S', '40-64', 'unvacc')] -= 2
+        return y0d
 
-        daily_vacc_per_elig = vacc_immun_gain / (groupN - V - Vxd - Ih - D)
-
-        I2R = I * (gamma * (1 - hosp - dnh)) * immune_rate_I
-        I2S = I * (gamma * (1 - hosp - dnh)) * (1 - immune_rate_I)
-
-        Ih2R = (1 - dh) * Ih / hlos * immune_rate_I
-        Ih2S = (1 - dh) * Ih / hlos * (1 - immune_rate_I)
-
-        A2RA = A * gamma * immune_rate_A
-        A2S = A * gamma * (1 - immune_rate_A)
-
-        dS = - S * transm_per_susc + R / dimmuneI + RA / dimmuneA - S * daily_vacc_per_elig + vacc_immun_loss + I2S + Ih2S + A2S  # susceptible & not vaccine-immune
-        dE = - E / alpha + S * transm_per_susc + Vxd * transm_per_susc * delta_share  # exposed
-        dI = (E * pS) / alpha - I * gamma  # infectious & symptomatic
-        dIh = I * hosp * gamma - Ih / hlos  # hospitalized (not considered infectious)
-        dA = E * (1 - pS) / alpha - A * gamma  # infectious asymptomatic
-        dR = I2R + Ih2R - R / dimmuneI - R * daily_vacc_per_elig  # recovered from symp-not-hosp & immune & not vaccine-immune
-        dRA = A2RA - RA / dimmuneA - RA * daily_vacc_per_elig  # recovered from asymptomatic & immune & not vaccine-immune
-        dV = (S + R + RA) * daily_vacc_per_elig * (1 - delta_vacc_escape) - vacc_immun_loss * (1 - delta_vacc_escape)  # vaccine-immune
-        dVxd = (S + R + RA) * daily_vacc_per_elig * delta_vacc_escape - vacc_immun_loss * delta_vacc_escape - Vxd * transm_per_susc * delta_share  # vaccine-immune except against delta (problem with too many people exiting)
-        dD = dnh * I * gamma + dh * Ih / hlos  # death
-
-        return dS, dE, dI, dIh, dA, dR, dRA, dV, dVxd, dD
-
-    # the differential equation, takes y, outputs dy
-    def seir(self, t, y):
-        ydf = CovidModel.y_to_df(y)
-
-        # get param and ef values from lookup table
-        t_int = min(math.floor(t), len(self.trange) - 1)
-        params = self.gparams_lookup[t_int]
-        ef = self.ef_by_t[t_int]
-
-        # build dy
-        dy = []
-        for group in self.groups:
-            transm = CovidModel.daily_transmission_per_susc(ef, I_total=ydf['I'].sum(), A_total=ydf['A'].sum(), **params[group])
-            dy += CovidModel.single_group_seir(
-                y=y,
-                single_group_y=list(ydf.loc[group, :]),
-                transm_per_susc=transm,
-                delta_share=self.variant_prevalence_df.loc[(t_int, group, 'delta'), 'e_prev'],
-                **params[group])
-                # **{**params[group], 'dnh': params[group]['dnh'] * max((1 + 0.001 * (ydf['Ih'].sum() - 1250)), 1)})
-
-        return dy
-
-    # the initial values for y
-    def y0(self):
-        y = []
-        for group in self.groups:
-            # the first initial value for each group (presumably uninfected) is the population, which we get from gparams
-            y.append(self.gparams['groupN'][group] - (1 if group == 'group1' else 0))
-            # everything else is 0, except...
-            y += [0] * (len(self.vars) - 1)
-        # ...we start with one infection in the first group
-        y[2] = 2
-        return y
-
-    # solve the diff eq using scipy.integrate.solve_ivp; put the solution in    self.solution_y (list) and self.solution_ydf (dataframe)
-    def solve_seir(self):
-        self.solution = spi.solve_ivp(fun=self.seir, t_span=[self.tmin, self.tmax], y0=self.y0(), t_eval=range(self.tmin, self.tmax))
-        if not self.solution.success:
-            raise RuntimeError(f'ODE solver failed with message: {self.solution.message}')
-        self.solution_y = np.transpose(self.solution.y)
-        self.solution_ydf_full = pd.concat([self.y_to_df(self.solution_y[t]) for t in self.trange], keys=self.trange, names=['t', 'group'])
+    # override solve_ode to use default y0_dict
+    def solve_seir(self, method='RK45'):
+        self.solve_ode(y0_dict=self.y0_dict, method=method)
 
     # count the total hosps by t as the sum of Ih and Ic
     def total_hosps(self):
-        return self.solution_ydf_summed['Ih']
+        return self.solution_sum('seir')['Ih']
 
     # count the new exposed individuals by day
     def new_exposed(self):
-        sum_df = self.solution_ydf_summed
-        return sum_df['E'] - sum_df['E'].shift(1) + sum_df['E'].shift(1) / self.gparams['alpha']
+        sum_df = self.solution_sum('seir')
+        return sum_df['E'] - sum_df['E'].shift(1) + sum_df['E'].shift(1) / self.raw_params['alpha']
 
     # create a new fit and assign to this model
     def gen_fit(self, engine, tags=None):
@@ -452,7 +309,7 @@ class CovidModel:
         fit.model = self
         self.fit_id = fit.write_to_db(engine)
 
-    # write to stage.covid_model_results in Postgres
+    # write to covid_model.results in Postgres
     def write_to_db(self, engine=None, tags=None, new_fit=False):
         if engine is None:
             engine = self.engine
@@ -461,38 +318,27 @@ class CovidModel:
         if new_fit or self.fit_id is None:
             self.gen_fit(engine, tags)
 
-        # get the summed solution, add null index for the group, and then append to group solutions
-        summed = self.solution_ydf_summed
-        summed['group'] = None
-        summed.set_index('group', append=True, inplace=True)
-        df = pd.concat([self.solution_ydf, summed])
-
         # join the ef values onto the dataframe
         ef_series = pd.Series(self.ef_by_t, name='ef').rename_axis('t')
         oef_series = pd.Series(self.obs_ef_by_t, name='observed_ef').rename_axis('t')
-        df = df.join(ef_series).join(oef_series)
-
-        # add estimated vaccine prevalence in each compartment
-        for v in ['s', 'e', 'i', 'h', 'd']:
-            df[f'vacc_prev_{v}'] = self.vacc_prevalence_df[v]
+        df = self.solution_ydf.stack(level=self.param_attr_names).join(ef_series).join(oef_series)
 
         # add fit_id and created_at date
         df['fit_id'] = self.fit_id
         df['created_at'] = dt.datetime.now()
 
         # add params
-        gparams_df = pd.DataFrame(self.gparams_lookup).unstack().rename_axis(index=['t', 'group']).rename("params").map(lambda d: json.dumps(d, ensure_ascii=False))
-        df = df.join(gparams_df, how='left')
-        print(df['params'])
+        params_df = pd.DataFrame.from_dict(self.params, orient='index').stack(level=list(range(len(self.param_attr_names)))).map(lambda d: json.dumps(d, ensure_ascii=False))
+        df = df.join(params_df.rename_axis(index=('t', ) + tuple(self.param_attr_names)).rename('params'), how='left')
 
         # write to database
-        df.to_sql('covid_model_results'
-                  , con=engine, schema='stage'
+        df.to_sql('results'
+                  , con=engine, schema='covid_model'
                   , index=True, if_exists='append', method='multi')
 
     def write_gparams_lookup_to_csv(self, fname):
-        df_by_t = {t: pd.DataFrame.from_dict(df_by_group, orient='index') for t, df_by_group in self.gparams_lookup.items()}
-        pd.concat(df_by_t, names=['t', 'group']).to_csv(fname)
+        df_by_t = {t: pd.DataFrame.from_dict(df_by_group, orient='index') for t, df_by_group in self.params.items()}
+        pd.concat(df_by_t, names=['t', 'age']).to_csv(fname)
 
 
 # class to find an optimal fit of transmission control (ef) values to produce model results that align with acutal hospitalizations
@@ -525,7 +371,7 @@ class CovidModelFit:
 
     @staticmethod
     def from_db(conn, fit_id):
-        df = pd.read_sql_query(f"select * from stage.covid_model_fits where id = '{fit_id}'", con=conn, coerce_float=True)
+        df = pd.read_sql_query(f"select * from covid_model.fits where id = '{fit_id}'", con=conn, coerce_float=True)
         fit_count = len(df['efs_cov'][0]) if df['efs_cov'][0] is not None else df['fit_params'][0]['fit_count']
         return CovidModelFit(
             tslices=df['tslices'][0]
@@ -559,7 +405,7 @@ class CovidModelFit:
         extended_ef_by_slice = self.fixed_efs + list(ef_by_slice)
         self.model.set_ef_by_t(extended_ef_by_slice)
         self.model.solve_seir()
-        return self.model.total_hosps()
+        return self.model.solution_sum('seir')['Ih']
 
     # the cost function: runs the model using a given set of efs, and returns the sum of the squared residuals
     def cost(self, ef_by_slice: list):
@@ -575,6 +421,7 @@ class CovidModelFit:
     # run an optimization to minimize the cost function using scipy.optimize.minimize()
     # method = 'curve_fit' or 'minimize'
     def run(self, engine, method='curve_fit', **model_params):
+
         if self.actual_hosp is None:
             self.actual_hosp = ExternalHosps(engine, self.model.datemin).fetch('emresource_hosps.csv')
 
@@ -608,19 +455,19 @@ class CovidModelFit:
                 cost, self.fitted_efs = optimizer.optimize(self.ps_cost, iters=10)
                 print(self.fitted_efs)
 
-            self.model.set_ef_by_t(self.efs)
+            # self.model.set_ef_by_t(self.efs)
 
-    # write the fit as a single row to stage.covid_model_fits, describing the optimized ef values
+    # write the fit as a single row to covid_model.fits, describing the optimized ef values
     def write_to_db(self, engine):
-        metadata = MetaData(schema='stage')
-        metadata.reflect(engine, only=['covid_model_fits'])
-        fits_table = metadata.tables['stage.covid_model_fits']
+        metadata = MetaData(schema='covid_model')
+        metadata.reflect(engine, only=['fits'])
+        fits_table = metadata.tables['covid_model.fits']
 
         if self.fit_params is not None:
             self.fit_params['fit_count'] = self.fit_count
 
         stmt = fits_table.insert().values(tslices=[int(x) for x in self.tslices],
-                                          model_params=self.model.gparams if self.model is not None else None,
+                                          model_params=self.model.raw_params if self.model is not None else None,
                                           fit_params=self.fit_params,
                                           efs=list(self.efs),
                                           observed_efs=self.model.obs_ef_by_slice if self.model is not None else None,
@@ -635,4 +482,3 @@ class CovidModelFit:
             self.model.fit_id = result.inserted_primary_key[0]
 
         return result.inserted_primary_key[0]
-

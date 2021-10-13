@@ -1,13 +1,13 @@
 {
-    "total_pop": 5805501,
-    "group_pop": {
+    "N": 5805501,
+    "groupN": {
       "0-19": 1411161,
       "20-39": 1697671,
       "40-64": 1818147,
       "65+": 878522
   },
-  "betta": 0.4793,
-  "gamm": 0.111111,
+  "beta": 0.4793,
+  "gamma": 0.111111,
   "alpha": 4,
   "pS": {
     "0-19": 0.110023,
@@ -51,7 +51,6 @@
   "mask": {"tslices":  [73, 94, 165], "value": [0, 0, 0, 0]},
   "ramp": {"tslices":  [129], "value": [0, 0]},
   "temp_on": false,
-  "vacc_eff": 1,
   "delta_vacc_escape": 0.10,
   "hlos": {
     "tslices": [190],
@@ -66,7 +65,9 @@
   "immune_rate_I": 0.925,
   "immune_rate_A": 0.85,
   "dimmuneA": 2514,
-  "dimmuneI": 2514,
+  "dimmuneI": 2514  ,
+  "max_vacc_share_of_remaining": 0.04,
+  "vaccines": {},
   "variants": {
     "b117": {
       "theta_file_path": "input/proportionvariantovertime.csv",
@@ -90,7 +91,7 @@
           "40-64": 1.60,
           "65+": 1.60
         },
-        "betta": 1.50,
+        "rel_inf_prob": 1.50,
         "pS": 1.0
       }
     },
@@ -101,7 +102,7 @@
         "hosp": 1.0,
         "dh": 1.0,
         "dnh": 1.0,
-        "betta": 1.20,
+        "rel_inf_prob": 1.20,
         "pS": 1.0
       }
     },
@@ -109,7 +110,6 @@
       "theta_file_path": "input/proportionvariantovertime.csv",
       "theta_column": "delta",
       "multipliers": {
-        "vacc_eff": 0.90,
         "hosp": {
           "0-19": 2.38,
           "20-39": 2.38,
@@ -128,7 +128,7 @@
           "40-64": 3.28,
           "65+": 3.28
         },
-        "betta": 2.25,
+        "rel_inf_prob": 2.25,
         "pS": 1.0
       }
     }

@@ -47,7 +47,7 @@ class ExternalHosps(ExternalData):
 
 
 class ExternalVacc(ExternalData):
-    def fetch_from_db(self, proj_params=None, groupN=None):
+    def fetch_from_db(self, proj_params=None, group_pop=None):
             sql = open('sql/vaccinations_by_age_group.sql', 'r').read()
 
             proj_params = proj_params if type(proj_params) == dict else json.load(open(proj_params))
@@ -57,7 +57,7 @@ class ExternalVacc(ExternalData):
             max_rate_per_remaining = proj_params['max_rate_per_remaining'] if 'max_rate_per_remaining' in proj_params.keys() else 1.0
             realloc_priority = proj_params['realloc_priority'] if 'realloc_priority' in proj_params.keys() else None
 
-            df = pd.read_sql(sql, self.engine, index_col=['measure_date', 'group', 'vacc'])
+            df = pd.read_sql(sql, self.engine, index_col=['measure_date', 'age', 'vacc'])
 
             # add projections
             proj_from_date = df.index.get_level_values('measure_date').max() + dt.timedelta(days=1)
@@ -65,7 +65,7 @@ class ExternalVacc(ExternalData):
                 proj_date_range = pd.date_range(proj_from_date, self.fill_to_date)
                 # project rates based on the last {proj_lookback} days of data
                 projected_rates = df.loc[(proj_from_date - dt.timedelta(days=proj_lookback)):].groupby(
-                    ['group', 'vacc']).sum() / float(proj_lookback)
+                    ['age', 'vacc']).sum() / float(proj_lookback)
                 # override rates using fixed values from proj_fixed_rates, when present
                 if proj_fixed_rates:
                     projected_rates['rate'] = pd.DataFrame(proj_fixed_rates).stack().combine_first(
@@ -77,8 +77,8 @@ class ExternalVacc(ExternalData):
 
                 # reduce rates to prevent cumulative vaccination from exceeding max_cumu
                 if max_cumu:
-                    cumu_vacc = df.loc[:(proj_from_date - dt.timedelta(days=1)), 'rate'].groupby('group').sum()
-                    groups = realloc_priority if realloc_priority else df.index.unique('group')
+                    cumu_vacc = df.loc[:(proj_from_date - dt.timedelta(days=1)), 'rate'].groupby('age').sum()
+                    groups = realloc_priority if realloc_priority else df.index.unique('age')
                     vaccs = df.index.unique('vacc')
                     for d in proj_date_range:
                         for i in range(len(groups)):
@@ -87,7 +87,7 @@ class ExternalVacc(ExternalData):
                             if current_rate > 0:
                                 this_max_cumu = max_cumu.copy()
                                 max_rate = max_rate_per_remaining * (
-                                            this_max_cumu[group] * groupN[group] - cumu_vacc[group])
+                                        this_max_cumu[group] * group_pop[group] - cumu_vacc[group])
                                 percent_excess = max((current_rate - max_rate) / current_rate, 0)
                                 for vacc in vaccs:
                                     excess_rate = df.loc[(d, group, vacc), 'rate'] * percent_excess
@@ -121,7 +121,7 @@ def get_hosps_by_age(engine, fname):
     df = df[[col for col in df.columns if col[:17] == 'HospCOVIDPatients']]
     df = df.rename(columns={col: col.replace('HospCOVIDPatients', '').replace('to', '-').replace('plus', '+') for col in df.columns})
     df = df.stack()
-    df.index = df.index.set_names(['measure_date', 'group'])
+    df.index = df.index.set_names(['measure_date', 'age'])
     cophs_total = df.groupby('measure_date').sum()
     emr_total = get_hosps_df(engine)
     return df * emr_total / cophs_total
@@ -153,7 +153,7 @@ def get_deaths_by_age(engine):
     where count_type like 'deaths, %%' and date_type = 'date of death'
     group by 1, 2
     order by 1, 2"""
-    df = pd.read_sql(sql, engine, parse_dates=['measure_date']).set_index(['measure_date', 'group'])
+    df = pd.read_sql(sql, engine, parse_dates=['measure_date']).set_index(['measure_date', 'age'])
     return df
 
 

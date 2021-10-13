@@ -7,7 +7,7 @@ select
         when v.age >= 20 and v.age <= 39 then '20-39'
         when v.age >= 40 and v.age <= 64 then '40-64'
         when v.age >= 65 then '65+'
-    end as age_group
+    end as age
     , coalesce(round(sum(v.first_dose_rate)), 0) as first_doses_given
     , coalesce(round(sum(v.first_dose_rate - v.jnj_dose_rate)), 0) as mrna_first_doses_given
     , coalesce(round(sum(v.final_dose_rate - v.jnj_dose_rate)), 0) as mrna_second_doses_given
