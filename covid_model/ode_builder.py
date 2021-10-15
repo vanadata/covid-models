@@ -204,7 +204,6 @@ class ODEBuilder:
 
     def ode(self, t, y):
         dy = np.zeros(self.length)
-
         t_int = min(np.floor(t), len(self.trange) - 1)
         for term in self.terms:
             dy += term.dy(t_int, y)

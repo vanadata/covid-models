@@ -44,7 +44,8 @@
   },
   "lamb": 1.395,
   "vacc_eff": 1,
-  "vacc_fail_rate": 0.00,
+  "delta_vacc_escape": 0.10,
+  "vacc_fail_rate": {"0-19": 0.03, "20-39": 0.03, "40-64": 0.03, "65+": 0.14},
   "hlos": {
     "tslices": [190],
     "value": {

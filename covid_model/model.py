@@ -17,7 +17,7 @@ from ode_builder import *
 class CovidModel(ODEBuilder):
     attr = OrderedDict({'seir': ['S', 'E', 'I', 'Ih', 'A', 'R', 'RA', 'D'],
                         'age': ['0-19', '20-39', '40-64', '65+'],
-                        'vacc': ['unvacc', 'mrna', 'jnj', 'vacc_fail']})
+                        'vacc': ['unvacc', 'vacc', 'vacc_fail']})
 
     param_attr_names = ('age', 'vacc')
 
@@ -133,35 +133,56 @@ class CovidModel(ODEBuilder):
         proj_params_dict = proj_params if isinstance(proj_params, dict) else json.load(open(proj_params))
 
         self.vacc_rate_df = ExternalVacc(self.engine, t0_date=self.datemin, fill_to_date=max(self.daterange)).fetch('input/past_and_projected_vaccinations.csv', proj_params=proj_params_dict, group_pop=self.raw_params['group_pop'])
-        self.vacc_rate_df['cumu'] = self.vacc_rate_df.groupby(['age', 'vacc'])['rate'].cumsum()
+
+        cumu = self.vacc_rate_df.groupby('age').cumsum()
+        age_group_pop = self.vacc_rate_df.index.get_level_values('age').to_series(index=self.vacc_rate_df.index).replace(self.raw_params['group_pop'])
+        unvacc = cumu.groupby('age').shift(1).fillna(0).apply(lambda s: age_group_pop - s)
+        vacc_per_unvacc = self.vacc_rate_df / unvacc
+
+        for shot in vacc_per_unvacc.columns:
+            for age in self.attr['age']:
+                for t in self.trange:
+                    for vacc in ['unvacc', 'vacc_fail']:
+                        self.set_param(f'{shot}_per_unvacc', vacc_per_unvacc.loc[(t, age), shot], {'age': age, 'vacc': vacc}, trange=[t])
+
 
     def set_vacc_eff(self, vacc_eff_params):
         vacc_eff_params = vacc_eff_params if isinstance(vacc_eff_params, dict) else json.load(open(vacc_eff_params))
-        vacc_mults = {k: v['multipliers'] for k, v in vacc_eff_params.items()}
-        vacc_onsets = {k: v['onset'] for k, v in vacc_eff_params.items() if 'onset' in v.keys()}
+        shots = list(self.vacc_rate_df.columns)
 
-        self.vacc_rate_df['eff_rate'] = 0
-        for vacc, onset in vacc_onsets.items():
-            for delay, share_of_eff, prior_share_of_eff in zip(onset['tslices'],
-                                                               onset['value'],
-                                                               [0] + onset['value'][:-1]):
-                delayed_vacc_rate = self.vacc_rate_df.xs(vacc, level='vacc', drop_level=False)['rate'].groupby(['age', 'vacc']).shift(delay).fillna(0)
-                self.vacc_rate_df['eff_rate'] += (share_of_eff - prior_share_of_eff) * pd.DataFrame(index=self.vacc_rate_df.index).join(delayed_vacc_rate, how='left')['rate'].fillna(0)
+        # set vacc fail rates
+        vacc_fail_rates = {k: v['fail_rate'] for k, v in vacc_eff_params.items()}
+        for shot in shots:
+            for age in self.attr['age']:
+                self.set_param(f'{shot}_fail_rate', vacc_fail_rates[shot][age], {'age': age})
 
-        self.vacc_rate_df['eff_cumu'] = self.vacc_rate_df['eff_rate'].groupby(['age', 'vacc']).cumsum()
-        self.vacc_rate_df['age_group_pop'] = self.vacc_rate_df.index.get_level_values('age').to_series(index=self.vacc_rate_df.index).replace(self.raw_params['group_pop'])
-        self.vacc_rate_df['eff_unvacc'] = self.vacc_rate_df['age_group_pop'] - self.vacc_rate_df['eff_cumu'].groupby(['age', 'vacc']).shift(1).fillna(0)
-        self.vacc_rate_df['eff_per_unvacc'] = self.vacc_rate_df['eff_rate'] / self.vacc_rate_df['eff_unvacc']
+        # set vacc eff
+        vacc_effs = {k: v['eff'] for k, v in vacc_eff_params.items()}
+        rate = self.vacc_rate_df.groupby(['age']).shift(7).fillna(0)
+        cumu = rate.groupby(['age']).cumsum()
 
+        # calculate the "terminal rate" for each shot, representing the number of people who received a given shot on a given day who will NOT receive another shot
+        terminal_cumu = pd.DataFrame(index=cumu.index)
+        for shot, next_shot in zip(shots, shots[1:] + [None]):
+            terminal_cumu[shot] = (cumu[shot] - cumu[next_shot].groupby(['age']).max()).clip(lower=0).reorder_levels(['t', 'age']) if next_shot is not None else cumu[shot].copy()
+        terminal_rate = terminal_cumu.groupby(['age']).diff().fillna(0)
+
+        # calculate the mean efficacy from the terminal rates
+        terminal_cumu_eff = pd.DataFrame(index=terminal_rate.index, columns=shots, data=0)
+        vacc_eff_decay = lambda days_ago: 1.1 * (1 - np.exp(-days_ago/7)) * np.exp(-days_ago/365)
+        for shot, initial_shot_eff in vacc_effs.items():
+            for days_ago in range(len(terminal_rate)):
+                terminal_cumu_eff[shot] += initial_shot_eff * vacc_eff_decay(days_ago) * terminal_rate[shot].groupby(['age']).shift(days_ago).fillna(0)
+        total_mean_eff = (terminal_cumu_eff.sum(axis=1) / terminal_cumu.sum(axis=1)).fillna(0)
+
+        # set vacc eff to the total mean efficacy
+        self.set_param('vacc_eff', 0, {'vacc': 'unvacc'})
+        self.set_param('vacc_eff', 0, {'vacc': 'vacc_fail'})
         for t in self.trange:
             for age in self.attr['age']:
-                # add vaccination rates to params
-                for vacc in vacc_onsets.keys():
-                    self.set_param(f'{vacc}_per_unvacc', self.vacc_rate_df.loc[(t, age, vacc), 'eff_per_unvacc'], {'age': age, 'vacc': 'unvacc'}, trange=[t])
-                # apply multipliers to params
-                for vacc, param_mults in vacc_mults.items():
-                    for param, mult in param_mults.items():
-                        self.params[t][(age, vacc)][param] *= mult
+                self.set_param('vacc_eff', total_mean_eff.loc[(t, age)], {'age': age, 'vacc': 'vacc'}, trange=[t])
+                self.params[t][(age, 'vacc')]['hosp'] *= 0
+                self.params[t][(age, 'vacc')]['dnh'] *= 0
 
     def set_variant_params(self, variant_params):
         dfs = {}
@@ -177,7 +198,6 @@ class CovidModel(ODEBuilder):
         df = pd.concat(dfs)
         df.index = df.index.set_names(['variant', 't', 'age']).reorder_levels(['t', 'age', 'variant'])
         df = df.sort_index().fillna(1)
-
 
         # fill in future variant prevalence by duplicating the last row
         variant_input_tmax = df.index.get_level_values('t').max()
@@ -196,6 +216,11 @@ class CovidModel(ODEBuilder):
                         for vacc in self.attr['vacc']:
                             self.params[t][(age, vacc)][col] *= agg_multipliers.loc[(t, age), col]
 
+        # execute delta impact on vacc prevalence
+        delta_prevalence_df = df['e_prev'].xs('delta', level='variant')
+        for (t, age), delta_prevalence in delta_prevalence_df.items():
+            non_delta_vacc_eff = self.params[t][(age, 'vacc')]['vacc_eff']
+            self.params[t][(age, 'vacc')]['vacc_eff'] -= 0.5 * non_delta_vacc_eff * (1 - non_delta_vacc_eff)
         self.variant_prevalence_df = df
 
     def set_param_using_age_dict(self, name, val, trange=None):
@@ -249,9 +274,10 @@ class CovidModel(ODEBuilder):
         self.reset_ode()
         for age in self.attributes['age']:
             for seir in self.attributes['seir']:
-                # self.add_flow((seir, age, 'unvacc'), (seir, age, 'vacc_fail'), '(mrna_per_unvacc + jnj_per_unvacc) * vacc_fail_rate')
-                self.add_flow((seir, age, 'unvacc'), (seir, age, 'mrna'), 'mrna_per_unvacc * (1 - vacc_fail_rate)')
-                self.add_flow((seir, age, 'unvacc'), (seir, age, 'jnj'), 'jnj_per_unvacc * (1 - vacc_fail_rate)')
+                self.add_flow((seir, age, 'unvacc'), (seir, age, 'vacc_fail'), 'shot1_per_unvacc * shot1_fail_rate')
+                self.add_flow((seir, age, 'unvacc'), (seir, age, 'vacc'), 'shot1_per_unvacc * (1 - shot1_fail_rate)')
+                self.add_flow((seir, age, 'vacc_fail'), (seir, age, 'vacc'), 'shot2_per_unvacc * (1 - shot2_fail_rate) / shot1_fail_rate')
+                self.add_flow((seir, age, 'vacc_fail'), (seir, age, 'vacc'), 'shot3_per_unvacc * (1 - shot3_fail_rate) / shot2_fail_rate')
             for vacc in self.attributes['vacc']:
                 self.add_flow(('S', age, vacc), ('E', age, vacc),
                                'betta * (1 - ef) * (1 - vacc_eff) * lamb / total_pop',

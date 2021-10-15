@@ -14,15 +14,18 @@ def build_legacy_output_df(model: CovidModel):
         dfs_by_group.append(ydf.xs(group, level='age').rename(columns={var: var + str(i+1) for var in model.attr['seir']}))
     df = pd.concat(dfs_by_group, axis=1)
 
+    params_df = model.params_as_df
+
     totals = model.solution_sum('seir')
-    vacc = model.solution_sum('vacc')
+    by_vacc = model.solution_sum(['seir', 'vacc'])
     df['Iht'] = totals['Ih']
     df['Dt'] = totals['D']
     df['Rt'] = totals['R'] + totals['RA']
     df['Itotal'] = totals['I'] + totals['A']
     df['Etotal'] = totals['E']
     df['Einc'] = df['Etotal'] / model.raw_params['alpha']
-    df['Vt'] = vacc['mrna'] * model.params[0][('65+', 'mrna')]['vacc_eff'] + vacc['jnj'] * model.params[0][('65+', 'jnj')]['vacc_eff']
+    # df['Vt'] = by_vacc['mrna'] * model.params[0][('65+', 'mrna')]['vacc_eff'] + by_vacc['jnj'] * model.params[0][('65+', 'jnj')]['vacc_eff']
+    df['Vt'] = by_vacc['mrna'] * model.params[0][('65+', 'mrna')]['vacc_eff'] + by_vacc['jnj'] * model.params[0][('65+', 'jnj')]['vacc_eff']
     df['immune'] = totals['R'] + totals['RA'] + df['Vt']
     df['date'] = model.daterange
     df['Ilag'] = totals['I'].shift(3)
