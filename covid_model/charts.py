@@ -248,9 +248,7 @@ if __name__ == '__main__':
     engine = db_engine()
 
     model = CovidModel([0, 700], engine=engine)
-    # model.set_ef_from_db(5324)
-    model.set_ef_from_db(0)
-    # model.efs[-1] = 1
+    model.set_ef_from_db(184)
 
     model.prep(params='input/params.json')
     t0 = perf_counter()
@@ -260,8 +258,6 @@ if __name__ == '__main__':
     model.write_to_db(engine)
     modeled(model, 'Ih')
     actual_hosps(engine)
-    # print(model.solution_sum(['seir', 'vacc'])[[('Ih', 'vacc_fail')]].sum(axis=1))
-    # plt.plot(model.daterange, model.solution_sum(['seir', 'vacc'])[[('Ih', 'vacc_fail')]].sum(axis=1), **{'c': 'blue'})
     plt.show()
     exit()
 

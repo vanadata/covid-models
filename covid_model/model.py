@@ -145,7 +145,6 @@ class CovidModel(ODEBuilder):
                     for vacc in ['unvacc', 'vacc_fail']:
                         self.set_param(f'{shot}_per_unvacc', vacc_per_unvacc.loc[(t, age), shot], {'age': age, 'vacc': vacc}, trange=[t])
 
-
     def set_vacc_eff(self, vacc_eff_params):
         vacc_eff_params = vacc_eff_params if isinstance(vacc_eff_params, dict) else json.load(open(vacc_eff_params))
         shots = list(self.vacc_rate_df.columns)
@@ -162,18 +161,23 @@ class CovidModel(ODEBuilder):
         cumu = rate.groupby(['age']).cumsum()
 
         # calculate the "terminal rate" for each shot, representing the number of people who received a given shot on a given day who will NOT receive another shot
-        terminal_cumu = pd.DataFrame(index=cumu.index)
-        for shot, next_shot in zip(shots, shots[1:] + [None]):
-            terminal_cumu[shot] = (cumu[shot] - cumu[next_shot].groupby(['age']).max()).clip(lower=0).reorder_levels(['t', 'age']) if next_shot is not None else cumu[shot].copy()
-        terminal_rate = terminal_cumu.groupby(['age']).diff().fillna(0)
+        # terminal_cumu = pd.DataFrame(index=cumu.index)
+        # for shot, next_shot in zip(shots, shots[1:] + [None]):
+        #     terminal_cumu[shot] = (cumu[shot] - cumu[next_shot].groupby(['age']).max()).clip(lower=0).reorder_levels(['t', 'age']) if next_shot is not None else cumu[shot].copy()
+        # terminal_rate = terminal_cumu.groupby(['age']).diff().fillna(0)
+        # print(terminal_rate.loc[500])
 
         # calculate the mean efficacy from the terminal rates
-        terminal_cumu_eff = pd.DataFrame(index=terminal_rate.index, columns=shots, data=0)
-        vacc_eff_decay = lambda days_ago: 1.1 * (1 - np.exp(-days_ago/7)) * np.exp(-days_ago/365)
-        for shot, initial_shot_eff in vacc_effs.items():
-            for days_ago in range(len(terminal_rate)):
-                terminal_cumu_eff[shot] += initial_shot_eff * vacc_eff_decay(days_ago) * terminal_rate[shot].groupby(['age']).shift(days_ago).fillna(0)
-        total_mean_eff = (terminal_cumu_eff.sum(axis=1) / terminal_cumu.sum(axis=1)).fillna(0)
+        terminal_cumu_eff = pd.DataFrame(index=rate.index, columns=shots, data=0)
+        vacc_eff_decay_mult = lambda days_ago: 1.0718 * (1 - np.exp(-days_ago/7)) * np.exp(-days_ago/540)
+        for shot, next_shot in zip(shots, shots[1:] + [None]):
+            for days_ago in range(len(rate)):
+                terminal_rate = np.minimum(rate[shot], (cumu[shot] - cumu.groupby('age').shift(-days_ago)[next_shot]).clip(lower=0)) if next_shot is not None else rate[shot]
+                terminal_cumu_eff[shot] += vacc_effs[shot] * vacc_eff_decay_mult(days_ago) * terminal_rate.groupby(['age']).shift(days_ago).fillna(0)
+                # tr[i] = min(rate[shot][i], cumu[shot][i] - cumu.loc[days_ago])
+                # terminal_cumu_eff[shot] += initial_shot_eff * vacc_eff_decay_mult(days_ago) * terminal_rate[shot].groupby(['age']).shift(days_ago).fillna(0)
+        total_mean_eff = (terminal_cumu_eff.sum(axis=1) / cumu[shots[0]]).fillna(0)
+        total_mean_eff.to_csv('vacc_total_mean_eff.csv')
 
         # set vacc eff to the total mean efficacy
         self.set_param('vacc_eff', 0, {'vacc': 'unvacc'})
@@ -219,8 +223,12 @@ class CovidModel(ODEBuilder):
         # execute delta impact on vacc prevalence
         delta_prevalence_df = df['e_prev'].xs('delta', level='variant')
         for (t, age), delta_prevalence in delta_prevalence_df.items():
-            non_delta_vacc_eff = self.params[t][(age, 'vacc')]['vacc_eff']
-            self.params[t][(age, 'vacc')]['vacc_eff'] -= 0.5 * non_delta_vacc_eff * (1 - non_delta_vacc_eff)
+            if t < self.tmax:
+                non_delta_vacc_eff = self.params[t][(age, 'vacc')]['vacc_eff']
+                self.params[t][(age, 'vacc')]['vacc_eff'] -= 0.5 * non_delta_vacc_eff * (1 - non_delta_vacc_eff) * delta_prevalence
+
+        pd.DataFrame.from_dict(self.params).stack().apply(lambda x: x['vacc_eff']).rename_axis(index=['age', 'vacc', 't']).xs('vacc', level='vacc').to_csv('output/vacc_total_mean_eff.csv')
+
         self.variant_prevalence_df = df
 
     def set_param_using_age_dict(self, name, val, trange=None):
@@ -276,8 +284,8 @@ class CovidModel(ODEBuilder):
             for seir in self.attributes['seir']:
                 self.add_flow((seir, age, 'unvacc'), (seir, age, 'vacc_fail'), 'shot1_per_unvacc * shot1_fail_rate')
                 self.add_flow((seir, age, 'unvacc'), (seir, age, 'vacc'), 'shot1_per_unvacc * (1 - shot1_fail_rate)')
-                self.add_flow((seir, age, 'vacc_fail'), (seir, age, 'vacc'), 'shot2_per_unvacc * (1 - shot2_fail_rate) / shot1_fail_rate')
-                self.add_flow((seir, age, 'vacc_fail'), (seir, age, 'vacc'), 'shot3_per_unvacc * (1 - shot3_fail_rate) / shot2_fail_rate')
+                self.add_flow((seir, age, 'vacc_fail'), (seir, age, 'vacc'), 'shot2_per_unvacc * (shot1_fail_rate - shot2_fail_rate) / shot1_fail_rate')
+                self.add_flow((seir, age, 'vacc_fail'), (seir, age, 'vacc'), 'shot3_per_unvacc * (shot2_fail_rate - shot3_fail_rate) / shot2_fail_rate')
             for vacc in self.attributes['vacc']:
                 self.add_flow(('S', age, vacc), ('E', age, vacc),
                                'betta * (1 - ef) * (1 - vacc_eff) * lamb / total_pop',
