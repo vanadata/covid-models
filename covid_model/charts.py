@@ -10,6 +10,8 @@ import seaborn as sns
 import datetime as dt
 import numpy as np
 import pandas as pd
+import pmdarima
+import arch
 from time import perf_counter
 
 
@@ -125,6 +127,12 @@ def uq_tc(fit: CovidModelFit, sample_n=100, **plot_params):
     plt.ylabel('TCpb')
 
 
+def uq_sample_tcs(fit, sample_n):
+    fitted_efs_dist = sps.multivariate_normal(mean=fit.fitted_efs, cov=fit.fitted_efs_cov)
+    fitted_efs_samples = fitted_efs_dist.rvs(sample_n)
+    return [list(fit.fixed_efs) + list(sample) for sample in fitted_efs_samples]
+
+
 # UQ sqaghetti plot
 def uq_spaghetti(fit, sample_n=100, tmax=600,
                  tc_shift=0, tc_shift_days=70, tc_shift_date=dt.date.today() + dt.timedelta(2) + dt.timedelta((6-dt.date.today().weekday()) % 7),
@@ -134,8 +142,9 @@ def uq_spaghetti(fit, sample_n=100, tmax=600,
     samples = fitted_efs_dist.rvs(sample_n)
 
     # for each sample, solve the model and add a line to the plot
-    model = CovidModel(fit.tslices, engine=engine)
-    model.add_tslice(tmax, 0)
+    model = CovidModel(fit.tslices + [tmax], list(fit.fixed_efs) + list(samples[0]) + [0], engine=engine)
+    # model.set_ef_from_db(fit.fit_id)
+    # model.add_tslice(tmax, 0)
     model.prep()
     for i, sample_fitted_efs in enumerate(samples):
         print(i)
@@ -151,7 +160,7 @@ def uq_spaghetti(fit, sample_n=100, tmax=600,
                 model.ef_by_t[t] += tc_shift
         # base_model.set_ef_by_t(list(fit.fixed_efs) + list(sample_fitted_efs) + [sample_fitted_efs[-1] + tc_shift])
         model.solve_seir()
-        modeled(model, compartments=compartments, **{'color': 'darkblue', 'alpha': 0.025, **plot_params})
+        modeled(model, compartments=compartments, **{'c': 'darkblue', 'alpha': 0.025, **plot_params})
         # plt.plot(model.daterange, model.total_hosps(), **{'color': 'darkblue', 'alpha': 0.025, **plot_params})
 
 # UQ histogram plot
@@ -244,18 +253,45 @@ def vaccination(fname='output/daily_vaccination_by_age (old).csv', **plot_params
     first_shot_rate.plot(**plot_params)
 
 
+def arima_garch_fit_and_sim(data):
+    transformed = np.log(1 - np.array(data))
+    # arima_model = pmdarima.auto_arima(transformed)
+    arima_model = pmdarima.ARIMA(order=(2, 0, 1)).fit(transformed)
+    print(arima_model.summary())
+
+    # fit ARIMA on transformed
+    p, d, q = arima_model.order
+    arima_residuals = arima_model.arima_res_.resid
+
+    # fit a GARCH(1,1) model on the residuals of the ARIMA model
+    garch = arch.arch_model(arima_residuals, p=1, q=1)
+    garch_model = garch.fit()
+
+    # Use ARIMA to predict mu
+    predicted_mu = arima_model.predict(n_periods=1)[0]
+
+    # Use GARCH to predict the residual
+    garch_forecast = garch_model.forecast(horizon=1, reindex=False, method='simulation')
+    # Combine both models' output: yt = mu + et
+    return 1 - np.exp(np.array([a[0] for a in garch_forecast.simulations.values[0]]) + predicted_mu)
+
+
+def plot_hosp_for_predicted_tcs():
+    pass
+
+
 if __name__ == '__main__':
     engine = db_engine()
 
     model = CovidModel([0, 700], engine=engine)
-    model.set_ef_from_db(184)
+    model.set_ef_from_db(363)
 
     model.prep(params='input/params.json')
     t0 = perf_counter()
     model.solve_seir()
     t1 = perf_counter()
     print(f'Solved ODE in {t1 - t0} seconds.')
-    model.write_to_db(engine)
+    # model.write_to_db(engine)
     modeled(model, 'Ih')
     actual_hosps(engine)
     plt.show()
@@ -268,18 +304,16 @@ if __name__ == '__main__':
     # actual_vs_modeled_deaths_by_group(engine, model)
     # plt.show()
 
+    next_tc_sims = arima_garch_fit_and_sim(model.efs)[:10]
+
     fig, ax = plt.subplots()
     plt.grid(color='lightgray')
-    # colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
     colors = ['tomato', 'royalblue', 'slategray']
-    # fit = CovidModelFit.from_db(engine, 5324)
-    fit = CovidModelFit.from_db(engine, 5457)
-    for i, tc_shift in enumerate([-0.10, 0.10, 0]):
-        # uq_spaghetti(fit, sample_n=200, tmax=700, tc_shift=tc_shift, tc_shift_days=56, color=colors[i], alpha=0.05, compartments='Ih')
-        uq_spaghetti(fit, sample_n=200, tmax=700, tc_shift=tc_shift, tc_shift_days=56, color=colors[i], alpha=0.05, compartments='Ih')
-        # uq_spaghetti(fit, sample_n=200, tmax=700, tc_shift=tc_shift, color=colors[i], alpha=0.05, compartments='D')
-        # uq_histogram(fit)
-        # exit()
+    fit = CovidModelFit.from_db(engine, 259)
+    # for i, tc_shift in enumerate([-0.10, 0.10, 0]):
+    #     uq_spaghetti(fit, sample_n=200, tmax=700, tc_shift=tc_shift, tc_shift_days=56, color=colors[i], alpha=0.05, compartments='Ih')
+    for next_tc in next_tc_sims:
+        uq_spaghetti(fit, sample_n=200, tmax=707, tc_shift=next_tc - model.efs[0], tc_shift_days=0, alpha=0.05, compartments='Ih')
     locator = mdates.MonthLocator(interval=2)
     formatter = mdates.ConciseDateFormatter(locator)
     ax.xaxis.set_major_locator(locator)

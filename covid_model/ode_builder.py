@@ -111,7 +111,7 @@ class ODEBuilder:
 
     @property
     def params_as_df(self):
-        return pd.concat({t: pd.DataFrame.from_dict(p, orient='index') for t, p in self.params.items()})
+        return pd.concat({t: pd.DataFrame.from_dict(p, orient='index') for t, p in self.params.items()}).rename_axis(index=['t'] + list(self.param_attr_names))
 
     def attr_level(self, attr_name):
         return self.attr_names.index(attr_name)

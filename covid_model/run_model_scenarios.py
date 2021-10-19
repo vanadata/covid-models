@@ -18,6 +18,7 @@ def build_legacy_output_df(model: CovidModel):
 
     totals = model.solution_sum('seir')
     by_vacc_status = model.solution_sum(['seir', 'vacc'])
+    by_age = model.solution_sum(['seir', 'age'])
     df['Iht'] = totals['Ih']
     df['Dt'] = totals['D']
     df['Rt'] = totals['R'] + totals['RA']
@@ -25,8 +26,13 @@ def build_legacy_output_df(model: CovidModel):
     df['Etotal'] = totals['E']
     df['Einc'] = df['Etotal'] / model.raw_params['alpha']
     # df['Vt'] = by_vacc['mrna'] * model.params[0][('65+', 'mrna')]['vacc_eff'] + by_vacc['jnj'] * model.params[0][('65+', 'jnj')]['vacc_eff']
-    # df['Vt'] = by_vacc_status['shot1'] * model.params[0][('65+', 'mrna')]['vacc_eff'] + by_vacc_status['jnj'] * model.params[0][('65+', 'jnj')]['vacc_eff']
-    # df['immune'] = totals['R'] + totals['RA'] + df['Vt']
+    # df['Vt'] = by_vacc_status[[('S', 'vacc'), ('R', 'vacc'), ('RA', 'vacc')]].sum(axis=1) * params_df.xs(['vacc_eff']
+    # df['immune'] = totals['R'] + totals['RA'] + by_vacc_status[('S', 'vacc')] * params_df['vacc_eff']
+    for i, age in enumerate(model.attr['age']):
+        df[f'Vt{i+1}'] = (model.solution[('S', age, 'vacc')] + model.solution[('R', age, 'vacc')] + model.solution[('RA', age, 'vacc')]) * params_df.xs((age, 'vacc'), level=('age', 'vacc'))['vacc_eff']
+        df[f'immune{i+1}'] = by_age[('R', age)] + by_age[('RA', age)] + model.solution[('S', age, 'vacc')] * params_df['vacc_eff']
+    df['Vt'] = sum(df[f'Vt{i+1}'] for i in range(4))
+    df['immune'] = sum(df[f'immune{i+1}'] for i in range(4))
     df['date'] = model.daterange
     df['Ilag'] = totals['I'].shift(3)
     df['Re'] = model.re_estimates
@@ -78,7 +84,7 @@ def main():
     tc_shift_dates = [dt.date.today() + dt.timedelta(days=-3)]
     tc_shift_dates = [dt.datetime.combine(d, dt.datetime.min.time()) for d in tc_shift_dates]
     tc_shift_length = None
-    tc_shift_dayss = [14, 56]
+    tc_shift_dayss = [14]
     batch = 'standard_' + dt.datetime.now().strftime('%Y%m%d_%H%M%S')
 
     # create models for low- and high-vaccine-uptake scenarios
@@ -113,14 +119,14 @@ def main():
 
         model.solve_seir()
         model.write_to_db(tags=fit_tags, new_fit=True)
-        legacy_outputs[tags_to_scen_label(fit_tags)] = build_legacy_output_df(model)
+        # legacy_outputs[tags_to_scen_label(fit_tags)] = build_legacy_output_df(model)
         return model
 
     # current fit
     tags = {'run_type': 'Current', 'batch': batch}
     run_model(models_by_vacc_scen[primary_vacc_scen], current_fit_id, fit_tags=tags)
     # output this one to it's own file
-    build_legacy_output_df(models_by_vacc_scen[primary_vacc_scen]).to_csv('output/out2.csv')
+    # build_legacy_output_df(models_by_vacc_scen[primary_vacc_scen]).to_csv('output/out2.csv')
     # and output the TCs to their own file
     build_tc_df(models_by_vacc_scen[primary_vacc_scen]).to_csv('output/tc_over_time.csv', index=False)
 
@@ -161,9 +167,9 @@ def main():
     #         tags = {'run_type': 'Custom Projection', 'batch': batch, 'tc_shift': scen, 'vacc_cap': vacc_scen}
     #         run_model(models_for_custom_scenarios[scen][vacc_scen], current_fit_id, tc_shift, )
 
-    df = pd.concat(legacy_outputs)
-    df.index.names = ['scenario', 'time']
-    df.to_csv('output/allscenarios.csv')
+    # df = pd.concat(legacy_outputs)
+    # df.index.names = ['scenario', 'time']
+    # df.to_csv('output/allscenarios.csv')
 
 
 if __name__ == '__main__':

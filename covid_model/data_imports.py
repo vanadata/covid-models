@@ -80,12 +80,12 @@ class ExternalVacc(ExternalData):
 
             # reduce rates to prevent cumulative vaccination from exceeding max_cumu
             if max_cumu:
-                max_cumu_df = pd.DataFrame(max_cumu) * pd.DataFrame(group_pop, index=shots).transpose()
-
                 cumu_vacc = df.groupby('age').sum()
                 groups = realloc_priority if realloc_priority else projections.index.unique('age')
                 # vaccs = df.index.unique('vacc')
                 for d in projections.index.unique('measure_date'):
+                    this_max_cumu = get_params(max_cumu.copy(), (d - self.fill_from_date.date()).days)
+                    max_cumu_df = pd.DataFrame(this_max_cumu) * pd.DataFrame(group_pop, index=shots).transpose()
                     for i in range(len(groups)):
                         group = groups[i]
                         current_rate = projections.loc[(d, group)]
