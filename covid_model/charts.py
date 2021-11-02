@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 import pmdarima
 import arch
+import json
 from time import perf_counter
 
 
@@ -58,10 +59,13 @@ def total_hosps(model, group=None, **plot_params):
     plt.plot(model.daterange, hosps, **{'c': 'blue', 'label': 'Modeled Hosps.', **plot_params})
 
 
-def modeled(model, compartments, transform=lambda x: x, **plot_params):
+def modeled(model, compartments, ax=None, transform=lambda x: x, **plot_params):
     if type(compartments) == str:
         compartments = [compartments]
-    plt.plot(model.daterange, transform(model.solution_sum('seir')[compartments].sum(axis=1)), **{'c': 'blue', **plot_params})
+    if ax:
+        ax.plot(model.daterange, transform(model.solution_sum('seir')[compartments].sum(axis=1)), **{'c': 'blue', **plot_params})
+    else:
+        plt.plot(model.daterange, transform(model.solution_sum('seir')[compartments].sum(axis=1)), **{'c': 'blue', **plot_params})
 
 
 def modeled_by_group(model, axs, compartment='Ih', **plot_params):
@@ -130,7 +134,7 @@ def uq_tc(fit: CovidModelFit, sample_n=100, **plot_params):
 def uq_sample_tcs(fit, sample_n):
     fitted_efs_dist = sps.multivariate_normal(mean=fit.fitted_efs, cov=fit.fitted_efs_cov)
     fitted_efs_samples = fitted_efs_dist.rvs(sample_n)
-    return [list(fit.fixed_efs) + list(sample) for sample in fitted_efs_samples]
+    return [list(fit.fixed_efs) + list(sample) for sample in (fitted_efs_samples if sample_n > 1 else [fitted_efs_samples])]
 
 
 # UQ sqaghetti plot
@@ -253,11 +257,11 @@ def vaccination(fname='output/daily_vaccination_by_age (old).csv', **plot_params
     first_shot_rate.plot(**plot_params)
 
 
-def arima_garch_fit_and_sim(data):
+def arima_garch_fit_and_sim(data, horizon=1):
+    # horizon=10
     transformed = np.log(1 - np.array(data))
     # arima_model = pmdarima.auto_arima(transformed)
-    arima_model = pmdarima.ARIMA(order=(2, 0, 1)).fit(transformed)
-    print(arima_model.summary())
+    arima_model = pmdarima.ARIMA(order=(2, 0, 1), suppress_warnings=True).fit(transformed)
 
     # fit ARIMA on transformed
     p, d, q = arima_model.order
@@ -268,34 +272,131 @@ def arima_garch_fit_and_sim(data):
     garch_model = garch.fit()
 
     # Use ARIMA to predict mu
-    predicted_mu = arima_model.predict(n_periods=1)[0]
+    predicted_mu = arima_model.predict(n_periods=horizon)
 
     # Use GARCH to predict the residual
-    garch_forecast = garch_model.forecast(horizon=1, reindex=False, method='simulation')
+    garch_forecast = garch_model.forecast(horizon=horizon, reindex=False, method='simulation')
     # Combine both models' output: yt = mu + et
-    return 1 - np.exp(np.array([a[0] for a in garch_forecast.simulations.values[0]]) + predicted_mu)
+    return 1 - np.exp(np.array([a + predicted_mu for a in garch_forecast.simulations.values[0]]))
 
 
-def plot_hosp_for_predicted_tcs():
-    pass
+def plot_hosp_for_predicted_tcs(fit: CovidModelFit, total_sample_count, sample_tc_count, max_date, engine, model_params={}, **plot_params):
+    fig, axs = plt.subplots(2, 2)
+    plt.grid(color='lightgray')
+
+    increment = 14
+    max_t = (max_date - dt.datetime(2020, 1, 24)).days
+    tslices = fit.tslices + list(range(fit.tslices[-1] + increment, max_t, 14)) + [max_t]
+
+    sample_tcs = uq_sample_tcs(fit, sample_tc_count)
+    horizon = len(tslices) - 1 - len(sample_tcs[0])
+
+    model = CovidModel(tslices=tslices, engine=engine)
+    model.prep(**model_params)
+    params_df = model.params_as_df
+
+    hosp_sims = pd.DataFrame(index=model.trange)
+    new_hosp_sims = pd.DataFrame(index=model.trange)
+    death_sims = pd.DataFrame(index=model.trange)
+    i = 0
+    for tcs in sample_tcs:
+        try:
+            next_tcs = arima_garch_fit_and_sim(tcs, horizon=horizon)
+        except ValueError:
+            print(f'COULD NOT PROJECT TCS FOR SAMPLE: {tcs}')
+            continue
+        print(f'Generating predictions for next TC for sampled fitted TCs: {tcs}')
+        for next_tc in next_tcs[:(total_sample_count//sample_tc_count)]:
+            i += 1
+            print(f'Generating and plotting simulation number {i}...')
+            model.set_ef_by_t(list(tcs) + list(next_tc))
+            model.solve_seir()
+            hosp_sims[i] = model.solution_sum('seir')['Ih']
+            new_hosp_sims[i] = (model.solution_ydf.stack(level='age').stack(level='vacc')['I'] * params_df['gamm'] * params_df['hosp']).groupby('t').sum()
+            death_sims[i] = model.solution_sum('seir')['D']
+            modeled(model, ax=axs[0, 0], compartments='Ih', **{'c': 'darkblue', 'alpha': min(1, 10.0/total_sample_count), **plot_params})
+
+    axs[0, 0].grid(color='lightgray')
+    locator = mdates.MonthLocator(interval=2)
+    formatter = mdates.ConciseDateFormatter(locator)
+    axs[0, 0].xaxis.set_major_locator(locator)
+    axs[0, 0].xaxis.set_major_formatter(formatter)
+    actual_hosps(engine, ax=axs[0, 0])
+    axs[0, 0].set_xlabel(None)
+    axs[0, 0].set_ylabel('Daily Patients Hospitalized with COVID-19')
+
+    hosp_peak = hosp_sims.loc[fit.tslices[-1]:].max(axis=0)
+    axs[0, 1].hist(hosp_peak, weights=np.ones(len(hosp_peak)) / len(hosp_peak), range=(1000, 2400), bins=28)
+    axs[0, 1].yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
+    axs[0, 1].set_xlabel('Hospitalized Patients Peak From Now Through Dec 31, 2021')
+
+    death_total = death_sims.iloc[-1] - death_sims.iloc[fit.tslices[-1]]
+    axs[1, 0].hist(death_total, weights=np.ones(len(hosp_peak)) / len(hosp_peak), color='xkcd:charcoal', range=(600, 2000), bins=28)
+    axs[1, 0].yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
+    axs[1, 0].set_xlabel('Total Deaths From Now Through Dec 31, 2021')
+
+    hosp_peak_t = hosp_sims.loc[fit.tslices[-1]:].idxmax(axis=0)
+    hosp_peak_date = [model.daterange[t] for t in hosp_peak_t]
+    locator = mdates.AutoDateLocator(minticks=3, maxticks=7)
+    formatter = mdates.ConciseDateFormatter(locator, show_offset=False)
+    axs[1, 1].xaxis.set_major_locator(locator)
+    axs[1, 1].xaxis.set_major_formatter(formatter)
+    axs[1, 1].hist(hosp_peak_date, weights=np.ones(len(hosp_peak)) / len(hosp_peak), color='darkgreen')
+    axs[1, 1].yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
+    axs[1, 1].set_xlabel('Day of Hospitalizations Peak From Now Through Dec 31, 2021')
+
+    fig.tight_layout(pad=1.4)
+    # plt.close(fig)
+    return new_hosp_sims
+
 
 
 if __name__ == '__main__':
     engine = db_engine()
 
-    model = CovidModel([0, 700], engine=engine)
-    model.set_ef_from_db(363)
+    # model = CovidModel([0, 900], engine=engine)
+    # model.set_ef_from_db(910)
+    # model.add_tslice(760, 0.0)
+    # model.prep()
+    # model.solve_seir()
+    # modeled(model, 'Ih')
+    # actual_hosps(engine)
 
-    model.prep(params='input/params.json')
-    t0 = perf_counter()
-    model.solve_seir()
-    t1 = perf_counter()
-    print(f'Solved ODE in {t1 - t0} seconds.')
-    # model.write_to_db(engine)
-    modeled(model, 'Ih')
-    actual_hosps(engine)
+    fit = CovidModelFit.from_db(engine, 994)
+    vacc_scens = ['current trajectory', 'increased booster uptake', '75% elig. boosters by Dec 31']
+    fig, ax = plt.subplots()
+    new_hosp_dists = pd.DataFrame()
+    for vacc_scen in vacc_scens:
+        new_hosp_sims = plot_hosp_for_predicted_tcs(fit, total_sample_count=200, sample_tc_count=40
+                                    , max_date=dt.datetime(2022, 2, 28)
+                                    , engine=engine
+                                    , model_params={'vacc_proj_params': json.load(open('input/vacc_proj_params.json'))[vacc_scen]})
+        new_hosp_dists[vacc_scen] = new_hosp_sims.loc[(dt.datetime.today() - dt.datetime(2020, 1, 24)).days:].sum()
+        plt.draw()
+
+    sns.displot(new_hosp_dists, ax=ax, kind='kde', fill=True)
+    print(new_hosp_dists.mean())
+    new_hosp_dists.to_csv('output/simulated_new_hosps_by_vacc_scen.csv')
+
+    # [plt.close(f) for f in plt.get_fignums() if f != fig.number]
+
     plt.show()
     exit()
+
+
+
+
+    # t0 = perf_counter()
+    # model.solve_seir()
+    # t1 = perf_counter()
+
+    # print(f'Solved ODE in {t1 - t0} seconds.')
+    from run_model_scenarios import build_legacy_output_df
+    # model.write_to_db(engine)
+    # modeled(model, 'Ih')
+    # actual_hosps(engine)
+    # plt.show()
+    # exit()
 
     # actual_vs_modeled_hosps_by_group('input/hosps_by_group_20210611.csv', model)
     # plt.show()
@@ -304,23 +405,23 @@ if __name__ == '__main__':
     # actual_vs_modeled_deaths_by_group(engine, model)
     # plt.show()
 
-    next_tc_sims = arima_garch_fit_and_sim(model.efs)[:10]
+    # next_tc_sims = arima_garch_fit_and_sim(model.efs)[:10]
 
-    fig, ax = plt.subplots()
-    plt.grid(color='lightgray')
-    colors = ['tomato', 'royalblue', 'slategray']
-    fit = CovidModelFit.from_db(engine, 259)
-    # for i, tc_shift in enumerate([-0.10, 0.10, 0]):
-    #     uq_spaghetti(fit, sample_n=200, tmax=700, tc_shift=tc_shift, tc_shift_days=56, color=colors[i], alpha=0.05, compartments='Ih')
-    for next_tc in next_tc_sims:
-        uq_spaghetti(fit, sample_n=200, tmax=707, tc_shift=next_tc - model.efs[0], tc_shift_days=0, alpha=0.05, compartments='Ih')
-    locator = mdates.MonthLocator(interval=2)
-    formatter = mdates.ConciseDateFormatter(locator)
-    ax.xaxis.set_major_locator(locator)
-    ax.xaxis.set_major_formatter(formatter)
-    ax.set_ylabel('Daily Patients Hospitalized with COVID-19')
-    # ax.set_ylabel('Cumulative Deaths from COVID-19')
-    plt.show()
+    # fig, ax = plt.subplots()
+    # plt.grid(color='lightgray')
+    # colors = ['tomato', 'royalblue', 'slategray']
+    # fit = CovidModelFit.from_db(engine, 259)
+    # # for i, tc_shift in enumerate([-0.10, 0.10, 0]):
+    # #     uq_spaghetti(fit, sample_n=200, tmax=700, tc_shift=tc_shift, tc_shift_days=56, color=colors[i], alpha=0.05, compartments='Ih')
+    # for next_tc in next_tc_sims:
+    #     uq_spaghetti(fit, sample_n=200, tmax=707, tc_shift=next_tc - model.efs[0], tc_shift_days=0, alpha=0.05, compartments='Ih')
+    # locator = mdates.MonthLocator(interval=2)
+    # formatter = mdates.ConciseDateFormatter(locator)
+    # ax.xaxis.set_major_locator(locator)
+    # ax.xaxis.set_major_formatter(formatter)
+    # ax.set_ylabel('Daily Patients Hospitalized with COVID-19')
+    # # ax.set_ylabel('Cumulative Deaths from COVID-19')
+    # plt.show()
 
     # uq_tc(CovidModelFit.from_db(engine, 4898), sample_n=10)
 

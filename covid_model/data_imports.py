@@ -182,14 +182,14 @@ class ExternalContactMatrices(ExternalData):
 
 # load actual hospitalization data for fitting
 def get_hosps(engine, min_date=dt.datetime(2020, 1, 24)):
-    actual_hosp_df = pd.read_sql('select * from cdphe.emresource_hospitalizations', engine)
+    actual_hosp_df = pd.read_sql(open('sql/emresource_hospitalizations.sql').read(), engine)
     actual_hosp_df['t'] = ((pd.to_datetime(actual_hosp_df['measure_date']) - min_date) / np.timedelta64(1, 'D')).astype(int)
     actual_hosp_tmin = actual_hosp_df[actual_hosp_df['currently_hospitalized'].notnull()]['t'].min()
     return [0] * actual_hosp_tmin + list(actual_hosp_df['currently_hospitalized'])
 
 
 def get_hosps_df(engine):
-    return pd.read_sql('select * from cdphe.emresource_hospitalizations', engine).set_index('measure_date')['currently_hospitalized']
+    return pd.read_sql(open('sql/emresource_hospitalizations.sql').read(), engine).set_index('measure_date')['currently_hospitalized']
 
 
 def get_hosps_by_age(engine, fname):
@@ -249,12 +249,3 @@ def get_corrected_emresource(fpath):
 
     print(raw_reports)
     print(pd.to_datetime(pd.to_numeric(raw_reports).groupby('facility').rolling(20).agg(np.max)))
-
-
-if __name__ == '__main__':
-    engine = db_engine()
-    # , t0_date = dt.datetime(2020, 1, 24)
-    df = ExternalVacc2(engine=engine, fill_to_date=dt.datetime(2022, 12, 31)).fetch(
-        proj_params=json.load(open('input/vacc_proj_params.json'))['current trajectory'],
-        group_pop=json.load(open('input/params.json'))['group_pop'])
-    print(df)
