@@ -185,6 +185,10 @@ class ODEBuilder:
                 if len(cmpt) < len(self.attributes.keys()):
                     raise ValueError(f'Scaling compartment `{cmpt}` does not have the right number of attributes.')
 
+        # if from_cmpt == ('S', '0-19', 'unvacc') and to_cmpt == ('E', '0-19', 'unvacc'):
+        #     print(coef)
+        #     exit()
+
         self.terms.append(ODEFlowTerm(
             from_cmpt_idx=self.cmpt_idx_lookup[from_cmpt],
             to_cmpt_idx=self.cmpt_idx_lookup[to_cmpt],

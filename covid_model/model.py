@@ -69,7 +69,7 @@ class CovidModel(ODEBuilder):
 
         # prep efs (ef_by_t)
         if self.ef_by_t is None:
-            self.set_ef_by_t(self.efs)
+            self.set_ef_by_t(self.efs if self.efs is not None else [0] * (len(self.tslices) - 1))
 
         # build ODE
         self.build_ode()
@@ -178,7 +178,7 @@ class CovidModel(ODEBuilder):
         vacc_eff_decay_mult = lambda days_ago: 1.0718 * (1 - np.exp(-days_ago/7)) * np.exp(-days_ago/540)
         for shot, next_shot in zip(shots, shots[1:] + [None]):
             for days_ago in range(len(rate)):
-                terminal_rate = np.minimum(rate[shot], (cumu[shot] - cumu.groupby('age').shift(-days_ago)[next_shot]).clip(lower=0)) if next_shot is not None else rate[shot]
+                terminal_rate = np.minimum(rate[shot], (cumu[shot] - cumu.groupby('age').shift(14-days_ago)[next_shot]).clip(lower=0)) if next_shot is not None else rate[shot]
                 terminal_cumu_eff[shot] += vacc_effs[shot] * vacc_eff_decay_mult(days_ago) * terminal_rate.groupby(['age']).shift(days_ago).fillna(0)
         total_mean_eff = (terminal_cumu_eff.sum(axis=1) / cumu[shots[0]]).fillna(0)
         total_mean_eff.to_csv('vacc_total_mean_eff.csv')
