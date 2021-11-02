@@ -111,7 +111,7 @@ class ODEBuilder:
 
     @property
     def params_as_df(self):
-        return pd.concat({t: pd.DataFrame.from_dict(p, orient='index') for t, p in self.params.items()})
+        return pd.concat({t: pd.DataFrame.from_dict(p, orient='index') for t, p in self.params.items()}).rename_axis(index=['t'] + list(self.param_attr_names))
 
     def attr_level(self, attr_name):
         return self.attr_names.index(attr_name)
@@ -204,7 +204,6 @@ class ODEBuilder:
 
     def ode(self, t, y):
         dy = np.zeros(self.length)
-
         t_int = min(np.floor(t), len(self.trange) - 1)
         for term in self.terms:
             dy += term.dy(t_int, y)

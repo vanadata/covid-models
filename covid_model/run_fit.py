@@ -44,6 +44,8 @@ def run_fit(engine, fit_id, look_back=0, batch_size=0, look_back_date=None, tags
     # print(fit.model.params[30])
     # exit()
     fit.model.solve_seir()
+    fit.model.write_to_db(engine)
+    print('t-slices:', fit.model.tslices)
     print('t-slices:', fit.model.tslices)
     print('TC by t-slice:', fit.model.efs)
 

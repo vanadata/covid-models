@@ -16,10 +16,11 @@ class ExternalData:
         self.fill_from_date = fill_from_date if fill_from_date is not None else t0_date
         self.fill_to_date = fill_to_date
 
-    def fetch(self, fpath, rerun=True, **args):
+    def fetch(self, fpath=None, rerun=True, **args):
         if rerun:
             df = self.fetch_from_db(**args)
-            df.reset_index().drop(columns='index', errors='ignore').to_csv(fpath, index=False)
+            if fpath is not None:
+                df.reset_index().drop(columns='index', errors='ignore').to_csv(fpath, index=False)
         else:
             df = pd.read_csv(fpath)
 
@@ -46,58 +47,133 @@ class ExternalHosps(ExternalData):
         pd.read_sql('select * from cdphe.emresource_hospitalizations', self.engine)
 
 
+def vacc_eff_decay(days_since):
+    return 1.1 * (1 - np.exp(-days_since/7)) * np.exp(-days_since/365)
+
+
 class ExternalVacc(ExternalData):
     def fetch_from_db(self, proj_params=None, group_pop=None):
-            sql = open('sql/vaccinations_by_age_group.sql', 'r').read()
+        sql = open('sql/vaccination_by_age_group_with_boosters_wide.sql', 'r').read()
 
-            proj_params = proj_params if type(proj_params) == dict else json.load(open(proj_params))
-            proj_lookback = proj_params['lookback'] if 'lookback' in proj_params.keys() else 7
-            proj_fixed_rates = proj_params['fixed_rates'] if 'fixed_rates' in proj_params.keys() else None
-            max_cumu = proj_params['max_cumu'] if 'max_cumu' in proj_params.keys() else 0
-            max_rate_per_remaining = proj_params['max_rate_per_remaining'] if 'max_rate_per_remaining' in proj_params.keys() else 1.0
-            realloc_priority = proj_params['realloc_priority'] if 'realloc_priority' in proj_params.keys() else None
+        proj_params = proj_params if type(proj_params) == dict else json.load(open(proj_params))
+        proj_lookback = proj_params['lookback'] if 'lookback' in proj_params.keys() else 7
+        proj_fixed_rates = proj_params['fixed_rates'] if 'fixed_rates' in proj_params.keys() else None
+        max_cumu = proj_params['max_cumu'] if 'max_cumu' in proj_params.keys() else 0
+        max_rate_per_remaining = proj_params['max_rate_per_remaining'] if 'max_rate_per_remaining' in proj_params.keys() else 1.0
+        realloc_priority = proj_params['realloc_priority'] if 'realloc_priority' in proj_params.keys() else None
 
-            df = pd.read_sql(sql, self.engine, index_col=['measure_date', 'age', 'vacc'])
+        df = pd.read_sql(sql, self.engine, index_col=['measure_date', 'age'])
+        shots = list(df.columns)
 
-            # add projections
-            proj_from_date = df.index.get_level_values('measure_date').max() + dt.timedelta(days=1)
-            if self.fill_to_date.date() >= proj_from_date:
-                proj_date_range = pd.date_range(proj_from_date, self.fill_to_date)
-                # project rates based on the last {proj_lookback} days of data
-                projected_rates = df.loc[(proj_from_date - dt.timedelta(days=proj_lookback)):].groupby(
-                    ['age', 'vacc']).sum() / float(proj_lookback)
-                # override rates using fixed values from proj_fixed_rates, when present
-                if proj_fixed_rates:
-                    projected_rates['rate'] = pd.DataFrame(proj_fixed_rates).stack().combine_first(
-                        projected_rates['rate'])
-                # add projections to dataframe
-                projections = pd.concat({d: projected_rates for d in proj_date_range})
-                projections['is_projected'] = True
-                df = pd.concat([df, projections]).sort_index()
+        # add projections
+        proj_from_date = df.index.get_level_values('measure_date').max() + dt.timedelta(days=1)
+        if self.fill_to_date.date() >= proj_from_date:
+            proj_date_range = pd.date_range(proj_from_date, self.fill_to_date)
+            # project rates based on the last {proj_lookback} days of data
+            projected_rates = df.loc[(proj_from_date - dt.timedelta(days=proj_lookback)):].groupby('age').sum() / float(proj_lookback)
+            # override rates using fixed values from proj_fixed_rates, when present
+            if proj_fixed_rates:
+                for shot in shots:
+                    projected_rates[shot] = pd.DataFrame(proj_fixed_rates)[shot]
+            # build projections
+            projections = pd.concat({d.date(): projected_rates for d in proj_date_range}).rename_axis(index=['measure_date', 'age'])
 
-                # reduce rates to prevent cumulative vaccination from exceeding max_cumu
-                if max_cumu:
-                    cumu_vacc = df.loc[:(proj_from_date - dt.timedelta(days=1)), 'rate'].groupby('age').sum()
-                    groups = realloc_priority if realloc_priority else df.index.unique('age')
-                    vaccs = df.index.unique('vacc')
-                    for d in proj_date_range:
-                        for i in range(len(groups)):
-                            group = groups[i]
-                            current_rate = df.loc[(d, group), 'rate'].sum()
-                            if current_rate > 0:
-                                this_max_cumu = max_cumu.copy()
-                                max_rate = max_rate_per_remaining * (
-                                        this_max_cumu[group] * group_pop[group] - cumu_vacc[group])
-                                percent_excess = max((current_rate - max_rate) / current_rate, 0)
-                                for vacc in vaccs:
-                                    excess_rate = df.loc[(d, group, vacc), 'rate'] * percent_excess
-                                    df.loc[(d, group, vacc), 'rate'] -= excess_rate
-                                    # if a reallocate_order is provided, reallocate excess rate to other groups
-                                    if i < len(groups) - 1 and realloc_priority is not None:
-                                        df.loc[(d, groups[i + 1], vacc), 'rate'] += excess_rate
-                            cumu_vacc[group] += df.loc[(d, group), 'rate'].sum()
+            # reduce rates to prevent cumulative vaccination from exceeding max_cumu
+            if max_cumu:
+                cumu_vacc = df.groupby('age').sum()
+                groups = realloc_priority if realloc_priority else projections.index.unique('age')
+                # vaccs = df.index.unique('vacc')
+                for d in projections.index.unique('measure_date'):
+                    this_max_cumu = get_params(max_cumu.copy(), (d - self.fill_from_date.date()).days)
+                    max_cumu_df = pd.DataFrame(this_max_cumu) * pd.DataFrame(group_pop, index=shots).transpose()
+                    for i in range(len(groups)):
+                        group = groups[i]
+                        current_rate = projections.loc[(d, group)]
+                        max_rate = max_rate_per_remaining * (max_cumu_df.loc[group] - cumu_vacc.loc[group])
+                        excess_rate = (projections.loc[(d, group)] - max_rate).clip(lower=0)
+                        projections.loc[(d, group)] -= excess_rate
+                        # if a reallocate_order is provided, reallocate excess rate to other groups
+                        if i < len(groups) - 1 and realloc_priority is not None:
+                            projections.loc[(d, groups[i + 1])] += excess_rate
 
-            return df
+                    cumu_vacc += projections.loc[d]
+
+            df = pd.concat([df, projections]).sort_index()
+
+        # get vacc rates from database, and calc rate and cumulative shots, shifting to account for 7-day delay of effect
+        # df = pd.read_sql(sql, self.engine, index_col=['measure_date', 'age', 'vacc']).sort_index()
+        shots = list(df.columns)
+        rate = df.groupby(['age']).shift(7).fillna(0)
+        cumu = rate.groupby(['age']).cumsum()
+
+        # calculate the "terminal rate" for each shot, representing the number of people who received a given shot on a given day who will NOT receive another shot
+        terminal_cumu = pd.DataFrame(index=cumu.index)
+        for shot, next_shot in zip(shots, shots[1:] + [None]):
+            terminal_cumu[shot] = (cumu[shot] - cumu[next_shot].groupby(['age']).max()).clip(lower=0).reorder_levels(['measure_date', 'age']) if next_shot is not None else cumu[shot].copy()
+        terminal_rate = terminal_cumu.groupby(['age']).diff().fillna(0)
+
+        # calculate the mean efficacy from the terminal rates
+        terminal_cumu_eff = pd.DataFrame(index=terminal_rate.index, columns=shots, data=0)
+        for shot, initial_shot_eff in {'shot1': 0.76, 'shot2': 0.97, 'shot3': 0.99}.items():
+            for days_ago in range(len(terminal_rate)):
+                terminal_cumu_eff[shot] += initial_shot_eff * vacc_eff_decay(days_ago) * terminal_rate[shot].groupby(['age']).shift(days_ago).fillna(0)
+        total_mean_eff = terminal_cumu_eff.sum(axis=1) / terminal_cumu.sum(axis=1)
+
+        total_mean_eff.to_csv('output/vacc_total_mean_eff.csv')
+
+        return df
+        
+
+# class ExternalVacc(ExternalData):
+#     def fetch_from_db(self, proj_params=None, group_pop=None):
+#         sql = open('sql/vaccinations_by_age_group.sql', 'r').read()
+#
+#         proj_params = proj_params if type(proj_params) == dict else json.load(open(proj_params))
+#         proj_lookback = proj_params['lookback'] if 'lookback' in proj_params.keys() else 7
+#         proj_fixed_rates = proj_params['fixed_rates'] if 'fixed_rates' in proj_params.keys() else None
+#         max_cumu = proj_params['max_cumu'] if 'max_cumu' in proj_params.keys() else 0
+#         max_rate_per_remaining = proj_params['max_rate_per_remaining'] if 'max_rate_per_remaining' in proj_params.keys() else 1.0
+#         realloc_priority = proj_params['realloc_priority'] if 'realloc_priority' in proj_params.keys() else None
+#
+#         df = pd.read_sql(sql, self.engine, index_col=['measure_date', 'age', 'vacc'])
+#
+#         # add projections
+#         proj_from_date = df.index.get_level_values('measure_date').max() + dt.timedelta(days=1)
+#         if self.fill_to_date.date() >= proj_from_date:
+#             proj_date_range = pd.date_range(proj_from_date, self.fill_to_date)
+#             # project rates based on the last {proj_lookback} days of data
+#             projected_rates = df.loc[(proj_from_date - dt.timedelta(days=proj_lookback)):].groupby(['age', 'vacc']).sum() / float(proj_lookback)
+#             # override rates using fixed values from proj_fixed_rates, when present
+#             if proj_fixed_rates:
+#                 projected_rates['rate'] = pd.DataFrame(proj_fixed_rates).stack().combine_first(projected_rates['rate'])
+#             # add projections to dataframe
+#             projections = pd.concat({d: projected_rates for d in proj_date_range})
+#             projections['is_projected'] = True
+#             df = pd.concat([df, projections]).sort_index()
+#
+#             # reduce rates to prevent cumulative vaccination from exceeding max_cumu
+#             if max_cumu:
+#                 cumu_vacc = df.loc[:(proj_from_date - dt.timedelta(days=1)), 'rate'].groupby('age').sum()
+#                 groups = realloc_priority if realloc_priority else df.index.unique('age')
+#                 vaccs = df.index.unique('vacc')
+#                 for d in proj_date_range:
+#                     for i in range(len(groups)):
+#                         group = groups[i]
+#                         current_rate = df.loc[(d, group), 'rate'].sum()
+#                         if current_rate > 0:
+#                             this_max_cumu = max_cumu.copy()
+#                             max_rate = max_rate_per_remaining * (
+#                                     this_max_cumu[group] * group_pop[group] - cumu_vacc[group])
+#                             percent_excess = max((current_rate - max_rate) / current_rate, 0)
+#                             for vacc in vaccs:
+#                                 excess_rate = df.loc[(d, group, vacc), 'rate'] * percent_excess
+#                                 df.loc[(d, group, vacc), 'rate'] -= excess_rate
+#                                 # if a reallocate_order is provided, reallocate excess rate to other groups
+#                                 if i < len(groups) - 1 and realloc_priority is not None:
+#                                     df.loc[(d, groups[i + 1], vacc), 'rate'] += excess_rate
+#                         cumu_vacc[group] += df.loc[(d, group), 'rate'].sum()
+#
+#         return df
 
 
 class ExternalContactMatrices(ExternalData):
@@ -175,23 +251,10 @@ def get_corrected_emresource(fpath):
     print(pd.to_datetime(pd.to_numeric(raw_reports).groupby('facility').rolling(20).agg(np.max)))
 
 
-# if __name__ == '__main__':
-#
-#
-#     # get_corrected_emresource('input/emresource.xlsx')
-#     engine = db_engine()
-#     get_vaccinations(engine)
-#
-#     proj_params = json.load(open('input/vacc_proj_params.json'))
-#     gparams = json.load(open('input/params.json'))
-#     get_vaccinations(engine
-#         , from_date = dt.date(2020, 1, 24)
-#         , proj_to_date = dt.date(2021, 12, 31)
-#         , proj_lookback = proj_params['lookback']
-#         , proj_fixed_rates = proj_params['fixed_rates'] if 'fixed_rates' in proj_params.keys() else None
-#         , max_cumu = {g: gparams['groupN'][g] * proj_params['max_cumu'][g] for g in ['0-19', '20-39', '40-64', '65+']}
-#         , max_rate_per_remaining = proj_params['max_rate_per_remaining']
-#         , realloc_priority = None)
-
-
-
+if __name__ == '__main__':
+    engine = db_engine()
+    # , t0_date = dt.datetime(2020, 1, 24)
+    df = ExternalVacc2(engine=engine, fill_to_date=dt.datetime(2022, 12, 31)).fetch(
+        proj_params=json.load(open('input/vacc_proj_params.json'))['current trajectory'],
+        group_pop=json.load(open('input/params.json'))['group_pop'])
+    print(df)
