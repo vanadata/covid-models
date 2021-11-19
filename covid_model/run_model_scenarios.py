@@ -21,13 +21,13 @@ def build_legacy_output_df(model: CovidModel):
     by_age = model.solution_sum(['seir', 'age'])
     df['Iht'] = totals['Ih']
     df['Dt'] = totals['D']
-    df['Rt'] = totals['R'] + totals['RA']
+    df['Rt'] = totals['R']
     df['Itotal'] = totals['I'] + totals['A']
     df['Etotal'] = totals['E']
     df['Einc'] = df['Etotal'] / model.raw_params['alpha']
     for i, age in enumerate(model.attr['age']):
-        df[f'Vt{i+1}'] = (model.solution_ydf[('S', age, 'vacc')] + model.solution_ydf[('R', age, 'vacc')] + model.solution_ydf[('RA', age, 'vacc')]) * params_df.xs((age, 'vacc'), level=('age', 'vacc'))['vacc_eff']
-        df[f'immune{i+1}'] = by_age[('R', age)] + by_age[('RA', age)] + model.solution_ydf[('S', age, 'vacc')] * params_df.xs((age, 'vacc'), level=('age', 'vacc'))['vacc_eff']
+        df[f'Vt{i+1}'] = (model.solution_ydf[('S', age, 'vacc')] + model.solution_ydf[('R', age, 'vacc')]) * params_df.xs((age, 'vacc'), level=('age', 'vacc'))['vacc_eff']
+        df[f'immune{i+1}'] = by_age[('R', age)] + model.solution_ydf[('S', age, 'vacc')] * params_df.xs((age, 'vacc'), level=('age', 'vacc'))['vacc_eff']
     df['Vt'] = sum(df[f'Vt{i+1}'] for i in range(4))
     df['immune'] = sum(df[f'immune{i+1}'] for i in range(4))
     df['date'] = model.daterange

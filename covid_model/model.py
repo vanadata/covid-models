@@ -7,15 +7,16 @@ import pyswarms as ps
 from sqlalchemy import MetaData
 from datetime import datetime
 import itertools
-from data_imports import ExternalHosps, ExternalVacc
-from utils import *
+from covid_model.data_imports import ExternalHosps, ExternalVacc
+from covid_model.model_specs import CovidModelSpecifications
+from covid_model.utils import *
 from collections import OrderedDict
-from ode_builder import *
+from covid_model.ode_builder import *
 
 
 # class used to run the model given a set of parameters, including transmission control (ef)
 class CovidModel(ODEBuilder):
-    attr = OrderedDict({'seir': ['S', 'E', 'I', 'Ih', 'A', 'R', 'RA', 'D'],
+    attr = OrderedDict({'seir': ['S', 'E', 'I', 'Ih', 'A', 'R', 'R2', 'D'],
                         'age': ['0-19', '20-39', '40-64', '65+'],
                         'vacc': ['unvacc', 'vacc', 'vacc_fail']})
 
@@ -38,9 +39,6 @@ class CovidModel(ODEBuilder):
         self.vacc_trans_mults_df = None
         self.vacc_prevalence_df = None
 
-        # variants
-        self.variant_prevalence_df = None
-
         # transmission control parameters
         self.efs = efs
         self.ef_by_t = None
@@ -54,18 +52,32 @@ class CovidModel(ODEBuilder):
         self.fit_id = fit_id
 
     # a model must be prepped before it can be run; if any params EXCEPT the efs (i.e. TC) change, it must be re-prepped
-    def prep(self, params='input/params.json', vacc_proj_params='input/vacc_proj_params.json', vacc_immun_params='input/vacc_immun_params.json'):
-        # prep general parameters (gparams_lookup)
-        if self.params is None or params is not None:
-            self.set_params_from_file(params if params is not None else 'input/params.json')
-            # prep variants (self.variant_prevalence_df and updates to self.gparams_lookup)
+    def prep(self, params='input/params.json',
+             vacc_proj_params=json.load(open('input/vacc_proj_params.json'))['current trajectory'], vacc_immun_params='input/vacc_immun_params.json',
+             param_multipliers='input/param_multipliers.json', variant_prevalence='input/variant_prevalence.csv', mab_prevalence='input/mab_prevalence.csv'):
 
+        cms = CovidModelSpecifications()
+        cms.set_model_params('input/params.json')
+        cms.set_vacc_rates(self.engine, json.load(open('input/vacc_proj_params.json'))['current trajectory'])
+        cms.set_vacc_immun('input/vacc_immun_params.json')
+        cms.add_timeseries_effect('variant', prevalence_data='input/variant_prevalence.csv',
+                                  param_multipliers='input/param_multipliers.json', fill_forward=True)
+        cms.add_timeseries_effect('mab', prevalence_data='input/mab_prevalence.csv',
+                                  param_multipliers='input/param_multipliers.json', fill_forward=True)
+
+        self.apply_specifications(cms)
+
+        # # prep general parameters
+        # if self.params is None or params is not None:
+        #     self.set_params_from_file(params if params is not None else 'input/params.json')
+        #
         # prep vacc rates, including projections (vacc_rate_df)
-        if self.vacc_rate_df is None or vacc_proj_params is not None:
-            self.set_vacc_rates(vacc_proj_params if vacc_proj_params is not None else json.load(open('input/vacc_proj_params.json'))['current trajectory'])
-            self.set_vacc_eff(vacc_immun_params if vacc_immun_params is not None else json.load(open('input/vacc_immun_params.json')))
-            if 'variants' in self.raw_params and self.raw_params['variants']:
-                self.set_variant_params(self.raw_params['variants'])
+        # if self.vacc_rate_df is None or vacc_proj_params is not None:
+            # self.set_vacc_rates(vacc_proj_params if vacc_proj_params is not None else json.load(open('input/vacc_proj_params.json'))['current trajectory'])
+            # self.set_vacc_eff(vacc_immun_params if vacc_immun_params is not None else json.load(open('input/vacc_immun_params.json')))
+            # prep variants (self.variant_prevalence_df and updates to params lookup)
+            # self.apply_multipliers_from_prevalence_file(prevalence_input=variant_prevalence, multiplier_input=param_multipliers)
+            # self.apply_multipliers_from_prevalence_file(prevalence_input=mab_prevalence, multiplier_input=param_multipliers)
 
         # prep efs (ef_by_t)
         if self.ef_by_t is None:
@@ -73,6 +85,51 @@ class CovidModel(ODEBuilder):
 
         # build ODE
         self.build_ode()
+
+    def apply_specifications(self, specs: CovidModelSpecifications):
+        # prep general parameters
+        self.set_params_from_file(specs.model_params)
+
+        # prep vacc rates, including projections (vacc_rate_df)
+        vacc_per_unvacc = specs.get_vacc_rate_per_unvacc()
+        vacc_mean_efficacy = specs.get_vacc_mean_efficacy()
+        vacc_fail_per_vacc = specs.get_vacc_fail_per_vacc()
+        vacc_fail_reduction_per_fail = specs.get_vacc_fail_reduction_per_vacc_fail()
+        for shot in vacc_per_unvacc.columns:
+            for age in self.attr['age']:
+                self.set_param(f'{shot}_fail_rate', vacc_fail_per_vacc[shot][age], {'age': age})
+                for t in self.trange:
+                    for vacc in ['unvacc', 'vacc_fail']:
+                        self.set_param(f'{shot}_per_unvacc', vacc_per_unvacc.loc[(t, age), shot], {'age': age, 'vacc': vacc}, trange=[t])
+
+        # set the fail rate for each dose
+        for shot in vacc_per_unvacc.columns:
+            for age in self.attr['age']:
+                self.set_param(f'{shot}_fail_rate', vacc_fail_per_vacc[shot][age], {'age': age})
+
+        # set vacc rate, vacc mean efficacy, and fail reduction rate
+        self.set_param('vacc_eff', 0, {'vacc': 'unvacc'})
+        self.set_param('vacc_eff', 0, {'vacc': 'vacc_fail'})
+        for age in self.attr['age']:
+            for t in self.trange:
+                for shot in vacc_per_unvacc.columns:
+                    for vacc in ['unvacc', 'vacc_fail']:
+                        self.set_param(f'{shot}_per_unvacc', vacc_per_unvacc.loc[(t, age), shot], {'age': age, 'vacc': vacc}, trange=[t])
+                self.set_param('vacc_eff', vacc_mean_efficacy.loc[(t, age)], {'age': age, 'vacc': 'vacc'}, trange=[t])
+                self.set_param('vacc_fail_reduction_per_vacc_fail', vacc_fail_reduction_per_fail.loc[(t, age)], {'age': age, 'vacc': 'vacc_fail'}, trange=[t])
+                # set hospitalization and mortality to 0 among the vacc successes
+                self.params[t][(age, 'vacc')]['hosp'] *= 0
+                self.params[t][(age, 'vacc')]['dnh'] *= 0
+
+        # alter parameters based on timeseries effects
+        multipliers = specs.get_timeseries_effect_multipliers()
+        # print(multipliers)
+        # exit()
+        for param, mult_by_t in multipliers.to_dict().items():
+            for t, mult in mult_by_t.items():
+                # t = (date - self.datemin).days
+                if t in self.trange:
+                    self.set_param(param, mult=mult, trange=[t])
 
     def set_ef_from_db(self, fit_id, extend=True):
         fit = CovidModelFit.from_db(self.engine, fit_id)
@@ -108,15 +165,15 @@ class CovidModel(ODEBuilder):
 
     # new exposures by day by group
     @property
-    def new_exposures(self):
+    def new_infections(self):
         return self.solution_sum('seir')['E'] / self.raw_params['alpha']
 
     # estimated reproduction number (length of infection * new_exposures / current_infections
     @property
     def re_estimates(self):
         infect_duration = 1 / self.raw_params['gamm']
-        infected = self.solution_sum('seir')['I'].shift(3)
-        return infect_duration * self.new_exposures.groupby('t').sum() / infected
+        infected = (self.solution_sum('seir')['I'].shift(3) + self.solution_sum('seir')['A'].shift(3))
+        return infect_duration * self.new_infections.groupby('t').sum() / infected
 
     # calc the observed TC by applying the variant multiplier to the base TC
     @property
@@ -157,8 +214,9 @@ class CovidModel(ODEBuilder):
         vacc_fail_per_vacc_df = pd.DataFrame.from_dict(vacc_fail_per_vacc).rename_axis(index='age')
 
         # set vacc eff
+        delay = 7
         vacc_effs = {k: v['eff'] for k, v in vacc_eff_params.items()}
-        rate = self.vacc_rate_df.groupby(['age']).shift(7).fillna(0)
+        rate = self.vacc_rate_df.groupby(['age']).shift(delay).fillna(0)
         cumu = rate.groupby(['age']).cumsum()
 
         # calculate fail rates
@@ -171,17 +229,18 @@ class CovidModel(ODEBuilder):
         pd.concat({'rate': rate.sum(axis=1), 'fail_increase': fail_increase, 'fail_reduction': fail_reduction,
                    'fail_cumu': fail_cumu, 'fail_reduction_per_fail': fail_reduction_per_fail},
                   axis=1).to_csv('output/fail_reduction_per_fail.csv')
-        # exit()
 
         # calculate the mean efficacy from the terminal rates
         terminal_cumu_eff = pd.DataFrame(index=rate.index, columns=shots, data=0)
-        vacc_eff_decay_mult = lambda days_ago: 1.0718 * (1 - np.exp(-days_ago/7)) * np.exp(-days_ago/540)
+        vacc_eff_decay_mult = lambda days_ago: 1.0718 * (1 - np.exp(-(days_ago+delay)/7)) * np.exp(-days_ago/540)
         for shot, next_shot in zip(shots, shots[1:] + [None]):
-            for days_ago in range(len(rate)):
-                terminal_rate = np.minimum(rate[shot], (cumu[shot] - cumu.groupby('age').shift(14-days_ago)[next_shot]).clip(lower=0)) if next_shot is not None else rate[shot]
-                terminal_cumu_eff[shot] += vacc_effs[shot] * vacc_eff_decay_mult(days_ago) * terminal_rate.groupby(['age']).shift(days_ago).fillna(0)
+            nonzero_ts = rate[shot][rate[shot] > 0].index.get_level_values('t')
+            if len(nonzero_ts) > 0:
+                days_ago_range = range(nonzero_ts.max() - nonzero_ts.min() + 1)
+                for days_ago in days_ago_range:
+                    terminal_rate = np.minimum(rate[shot], (cumu[shot] - cumu.groupby('age').shift(-days_ago)[next_shot]).clip(lower=0)) if next_shot is not None else rate[shot]
+                    terminal_cumu_eff[shot] += vacc_effs[shot] * vacc_eff_decay_mult(days_ago) * terminal_rate.groupby(['age']).shift(days_ago).fillna(0)
         total_mean_eff = (terminal_cumu_eff.sum(axis=1) / cumu[shots[0]]).fillna(0)
-        total_mean_eff.to_csv('vacc_total_mean_eff.csv')
 
         # set vacc eff to the total mean efficacy
         self.set_param('vacc_eff', 0, {'vacc': 'unvacc'})
@@ -193,48 +252,29 @@ class CovidModel(ODEBuilder):
                 self.params[t][(age, 'vacc')]['hosp'] *= 0
                 self.params[t][(age, 'vacc')]['dnh'] *= 0
 
-    def set_variant_params(self, variant_params):
-        dfs = {}
-        for variant, specs in variant_params.items():
-            var_df = pd.read_csv(specs['theta_file_path'])  # file with at least a col "t" and a col containing variant prevalence
-            var_df = var_df.rename(columns={specs['theta_column']: variant})[['t', variant]].set_index('t').rename(columns={variant: 'e_prev'}).astype(float)  # get rid of all columns except t (the index) and the prev value
-            if 't_min' in specs.keys():
-                var_df['e_prev'].loc[:specs['t_min']] = 0
-            mult_df = pd.DataFrame(specs['multipliers'], index=self.attr['age']).rename(columns={col: f'{col}' for col in specs['multipliers'].keys()})
-            mult_df.index = mult_df.index.rename('age')
-            combined = pd.MultiIndex.from_product([var_df.index, mult_df.index], names=['t', 'age']).to_frame().join(var_df).join(mult_df).drop(columns=['t', 'age'])  # cross join
-            dfs[variant] = combined
-        df = pd.concat(dfs)
-        df.index = df.index.set_names(['variant', 't', 'age']).reorder_levels(['t', 'age', 'variant'])
-        df = df.sort_index().fillna(1)
+    def apply_multipliers_from_prevalence_file(self, prevalence_input, multiplier_input):
+        # build prevalence and multiplier dataframes from inputs
+        prevalence_df = pd.read_csv(prevalence_input, parse_dates=['date'], index_col=0) if isinstance(prevalence_input, str) else prevalence_input.copy()
+        prevalence_df.index = (prevalence_df.index.to_series().dt.date - self.datemin).dt.days
 
-        # fill in future variant prevalence by duplicating the last row
-        variant_input_tmax = df.index.get_level_values('t').max()
-        if variant_input_tmax < self.tmax:
-            projections = pd.concat({t: df.loc[variant_input_tmax] for t in range(variant_input_tmax + 1, self.tmax)})
-            df = pd.concat([df, projections]).sort_index()
+        multiplier_dict = json.load(open(multiplier_input)) if isinstance(multiplier_input, str) else prevalence_input
+        multiplier_df = pd.DataFrame.from_dict(multiplier_dict, orient='index').rename_axis(index='effect').fillna(1)
+
+        # fill in future prevalence by duplicating the last row
+        if prevalence_df.index.max() < self.tmax:
+            projections = pd.DataFrame.from_dict({t: prevalence_df.iloc[-1] for t in range(prevalence_df.index.max() + 1, self.tmax)}, orient='index')
+            prevalence_df = pd.concat([prevalence_df, projections]).sort_index()
+
+        # calc multipliers
+        prevalence = prevalence_df.stack().rename_axis(index=['t', 'effect'])
+        remainder = 1 - prevalence.groupby('t').sum()
+        aggregate_multipliers = multiplier_df.multiply(prevalence, axis=0).groupby('t').sum().add(remainder, axis=0)
 
         # apply multipliers
-        wildtype_prevalences = 1 - df['e_prev'].groupby(['t', 'age']).sum()
-        agg_multipliers = df.apply(lambda s: s*df['e_prev']).groupby(['t', 'age']).sum().apply(lambda s: s + 1 * wildtype_prevalences)
-
-        for col in agg_multipliers.columns:
-            if col != 'e_prev':
-                for t, age in agg_multipliers.index.values:
-                    if t in self.trange:
-                        for vacc in self.attr['vacc']:
-                            self.params[t][(age, vacc)][col] *= agg_multipliers.loc[(t, age), col]
-
-        # execute delta impact on vacc prevalence
-        delta_prevalence_df = df['e_prev'].xs('delta', level='variant')
-        for (t, age), delta_prevalence in delta_prevalence_df.items():
-            if t < self.tmax:
-                non_delta_vacc_eff = self.params[t][(age, 'vacc')]['vacc_eff']
-                self.params[t][(age, 'vacc')]['vacc_eff'] -= 0.5 * non_delta_vacc_eff * (1 - non_delta_vacc_eff) * delta_prevalence
-
-        pd.DataFrame.from_dict(self.params).stack().apply(lambda x: x['vacc_eff']).rename_axis(index=['age', 'vacc', 't']).xs('vacc', level='vacc').to_csv('output/vacc_total_mean_eff.csv')
-
-        self.variant_prevalence_df = df
+        for param, mult_by_t in aggregate_multipliers.to_dict().items():
+            for t, mult in mult_by_t.items():
+                if t in self.trange:
+                    self.set_param(param, mult=mult, trange=[t])
 
     def set_param_using_age_dict(self, name, val, trange=None):
         if not isinstance(val, dict):
@@ -288,52 +328,53 @@ class CovidModel(ODEBuilder):
     # build ODE
     def build_ode(self):
         self.reset_ode()
+        vacc_eff_w_delta = 'vacc_eff * (1 - (1 - nondelta_prevalence) * delta_max_efficacy_reduction * (1 - vacc_eff))'
+        base_transm = f'betta * (1 - ef) * (1 - {vacc_eff_w_delta}) / total_pop'
+        # infectious_cmpts = [('A', a, v) for a in self.attributes['age'] for v in self.attributes['vacc']]
+        infectious_cmpts = [(s, a, v) for a in self.attributes['age'] for v in self.attributes['vacc'] for s in ['I', 'A']]
+        infectious_cmpt_coefs = [' * '.join(['lamb' if seir == 'I' else '1', 'unvacc_relative_transm' if vacc == 'unvacc' else '1']) for seir, age, vacc in infectious_cmpts]
         for age in self.attributes['age']:
+            self.add_flow(('S', age, 'unvacc'), ('E', age, 'unvacc'), f'unvacc_relative_transm * {base_transm}', scale_by_cmpts=infectious_cmpts, scale_by_cmpts_coef=infectious_cmpt_coefs)
+            self.add_flow(('S', age, 'vacc'), ('E', age, 'vacc'), base_transm, scale_by_cmpts=infectious_cmpts, scale_by_cmpts_coef=infectious_cmpt_coefs)
+            self.add_flow(('S', age, 'vacc_fail'), ('E', age, 'vacc_fail'), base_transm, scale_by_cmpts=infectious_cmpts, scale_by_cmpts_coef=infectious_cmpt_coefs)
             for seir in self.attributes['seir']:
                 self.add_flow((seir, age, 'unvacc'), (seir, age, 'vacc_fail'), 'shot1_per_unvacc * shot1_fail_rate')
                 self.add_flow((seir, age, 'unvacc'), (seir, age, 'vacc'), 'shot1_per_unvacc * (1 - shot1_fail_rate)')
                 self.add_flow((seir, age, 'vacc_fail'), (seir, age, 'vacc'), 'vacc_fail_reduction_per_vacc_fail')
-                # self.add_flow((seir, age, 'vacc_fail'), (seir, age, 'vacc'), 'shot2_per_unvacc * (shot1_fail_rate - shot2_fail_rate) / shot1_fail_rate')
-                # self.add_flow((seir, age, 'vacc_fail'), (seir, age, 'vacc'), 'shot3_per_unvacc * (shot2_fail_rate - shot3_fail_rate) / shot2_fail_rate')
             for vacc in self.attributes['vacc']:
-                self.add_flow(('S', age, vacc), ('E', age, vacc),
-                               'betta * (1 - ef) * (1 - vacc_eff) * lamb / total_pop',
-                               scale_by_cmpts=[('I', a, v) for a in self.attributes['age'] for v in self.attributes['vacc']])
-                self.add_flow(('S', age, vacc), ('E', age, vacc),
-                               'betta * (1 - ef) * (1 - vacc_eff) / total_pop',
-                               scale_by_cmpts=[('A', a, v) for a in self.attributes['age'] for v in self.attributes['vacc']])
                 self.add_flow(('E', age, vacc), ('I', age, vacc), '1 / alpha * pS')
                 self.add_flow(('E', age, vacc), ('A', age, vacc), '1 / alpha * (1 - pS)')
                 self.add_flow(('I', age, vacc), ('Ih', age, vacc), 'gamm * hosp')
                 self.add_flow(('I', age, vacc), ('D', age, vacc), 'gamm * dnh')
                 self.add_flow(('I', age, vacc), ('R', age, vacc), 'gamm * (1 - hosp - dnh) * immune_rate_I')
                 self.add_flow(('I', age, vacc), ('S', age, vacc), 'gamm * (1 - hosp - dnh) * (1 - immune_rate_I)')
-                self.add_flow(('A', age, vacc), ('RA', age, vacc), 'gamm * immune_rate_A')
+                self.add_flow(('A', age, vacc), ('R', age, vacc), 'gamm * immune_rate_A')
                 self.add_flow(('A', age, vacc), ('S', age, vacc), 'gamm * (1 - immune_rate_A)')
                 self.add_flow(('Ih', age, vacc), ('D', age, vacc), '1 / hlos * dh')
                 self.add_flow(('Ih', age, vacc), ('R', age, vacc), '1 / hlos * (1 - dh) * immune_rate_I')
                 self.add_flow(('Ih', age, vacc), ('S', age, vacc), '1 / hlos * (1 - dh) * (1 - immune_rate_I)')
-                self.add_flow(('R', age, vacc), ('S', age, vacc), '1 / dimmuneI')
-                self.add_flow(('RA', age, vacc), ('S', age, vacc), '1 / dimmuneA')
+                self.add_flow(('R', age, vacc), ('R2', age, vacc), '1 / immune_decay_days_1')
+                self.add_flow(('R2', age, vacc), ('S', age, vacc), '1 / immune_decay_days_2')
 
     # reset terms that depend on TC; this takes about 0.08 sec, while rebuilding the whole ODE takes ~0.90 sec
     def rebuild_ode_with_new_tc(self):
         self.reset_terms({'seir': 'S'}, {'seir': 'E'})
         for age in self.attributes['age']:
             for vacc in self.attributes['vacc']:
+                vacc_eff_w_delta = 'vacc_eff * (1 - (1 - nondelta_prevalence) * delta_max_efficacy_reduction * (1 - vacc_eff))'
                 self.add_flow(('S', age, vacc), ('E', age, vacc),
-                              'betta * (1 - ef) * (1 - vacc_eff) * lamb / total_pop',
+                              f'lamb * betta * (1 - ef) * (1 - {vacc_eff_w_delta}) / total_pop',
                               scale_by_cmpts=[('I', a, v) for a in self.attributes['age'] for v in self.attributes['vacc']])
                 self.add_flow(('S', age, vacc), ('E', age, vacc),
-                              'betta * (1 - ef) * (1 - vacc_eff) / total_pop',
+                              f'betta * (1 - ef) * (1 - {vacc_eff_w_delta}) / total_pop',
                               scale_by_cmpts=[('A', a, v) for a in self.attributes['age'] for v in self.attributes['vacc']])
 
     # define initial state y0
     @property
     def y0_dict(self):
         y0d = {('S', age, 'unvacc'): n for age, n in self.raw_params['group_pop'].items()}
-        y0d[('I', '40-64', 'unvacc')] = 2
-        y0d[('S', '40-64', 'unvacc')] -= 2
+        y0d[('I', '40-64', 'unvacc')] = 2.2
+        y0d[('S', '40-64', 'unvacc')] -= 2.2
         return y0d
 
     # override solve_ode to use default y0_dict
@@ -377,6 +418,10 @@ class CovidModel(ODEBuilder):
         # add params
         params_df = pd.DataFrame.from_dict(self.params, orient='index').stack(level=list(range(len(self.param_attr_names)))).map(lambda d: json.dumps(d, ensure_ascii=False))
         df = df.join(params_df.rename_axis(index=('t', ) + tuple(self.param_attr_names)).rename('params'), how='left')
+
+        # Merge R and R2 into one column
+        df['R'] += df['R2']
+        del df['R2']
 
         # write to database
         df.to_sql('results'
@@ -469,13 +514,19 @@ class CovidModelFit:
 
     # run an optimization to minimize the cost function using scipy.optimize.minimize()
     # method = 'curve_fit' or 'minimize'
-    def run(self, engine, method='curve_fit', **model_params):
+    def run(self, engine, method='curve_fit', base_model=None, **model_params):
 
         if self.actual_hosp is None:
             self.actual_hosp = ExternalHosps(engine, self.model.datemin).fetch('emresource_hosps.csv')
 
         self.model = CovidModel(tslices=self.tslices, efs=self.fixed_efs + self.fit_params['efs0'], engine=engine)
-        self.model.prep(**model_params)
+        if base_model is not None:
+            self.model.params = base_model.params
+            self.model.raw_params = base_model.raw_params
+            self.model.set_ef_by_t(self.model.efs)
+            self.model.build_ode()
+        else:
+            self.model.prep(**model_params)
 
         # run fit
         if self.model.efs != self.fixed_efs:

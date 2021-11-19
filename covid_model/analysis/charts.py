@@ -1,6 +1,6 @@
-from data_imports import get_deaths, get_hosps_df, get_hosps_by_age, get_deaths_by_age
-from model import CovidModel, CovidModelFit
-from db import db_engine
+from covid_model.data_imports import get_deaths, get_hosps_df, get_hosps_by_age, get_deaths_by_age
+from covid_model.model import CovidModel, CovidModelFit
+from covid_model.db import db_engine
 import scipy.stats as sps
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
@@ -28,6 +28,18 @@ def actual_hosps_by_group(engine, fname, axs, **plot_params):
         ax.set_title(g)
         ax.legend(loc='best')
         ax.set_xlabel('')
+
+
+def mmwr_infections_growth_rate(model: CovidModel):
+    params_df = model.params_as_df
+    new_infections = (model.solution_ydf.stack(level='age').stack(level='vacc')['E'] / params_df['alpha']).groupby('t').sum()
+    growth_rate = 100 * (np.log(new_infections.cumsum()) - np.log(new_infections.shift(1).cumsum()))
+    # growth_rate = 100 * (np.log(new_infections.rolling(150).sum()) - np.log(new_infections.shift(1).rolling(149).sum()))
+    plt.plot(model.daterange[90:], growth_rate[90:])
+
+
+def re_estimates(model: CovidModel):
+    plt.plot(model.daterange[90:], model.re_estimates[90:])
 
 
 def actual_deaths_by_group(engine, axs, **plot_params):
@@ -63,9 +75,9 @@ def modeled(model, compartments, ax=None, transform=lambda x: x, **plot_params):
     if type(compartments) == str:
         compartments = [compartments]
     if ax:
-        ax.plot(model.daterange, transform(model.solution_sum('seir')[compartments].sum(axis=1)), **{'c': 'blue', **plot_params})
+        ax.plot(model.daterange, transform(model.solution_sum('seir')[compartments].sum(axis=1)), **{**plot_params})
     else:
-        plt.plot(model.daterange, transform(model.solution_sum('seir')[compartments].sum(axis=1)), **{'c': 'blue', **plot_params})
+        plt.plot(model.daterange, transform(model.solution_sum('seir')[compartments].sum(axis=1)), **{**plot_params})
 
 
 def modeled_by_group(model, axs, compartment='Ih', **plot_params):
@@ -81,7 +93,7 @@ def transmission_control(model, **plot_params):
 
 
 def re_estimates(model, **plot_params):
-    plt.plot(model.daterange, model.re_estimates, **plot_params)
+    plt.plot(model.daterange[90:], model.re_estimates[90:], **plot_params)
 
 
 def new_deaths_by_group(model, axs, **plot_params):
@@ -258,7 +270,6 @@ def vaccination(fname='output/daily_vaccination_by_age (old).csv', **plot_params
 
 
 def arima_garch_fit_and_sim(data, horizon=1):
-    # horizon=10
     transformed = np.log(1 - np.array(data))
     # arima_model = pmdarima.auto_arima(transformed)
     arima_model = pmdarima.ARIMA(order=(2, 0, 1), suppress_warnings=True).fit(transformed)
@@ -269,7 +280,7 @@ def arima_garch_fit_and_sim(data, horizon=1):
 
     # fit a GARCH(1,1) model on the residuals of the ARIMA model
     garch = arch.arch_model(arima_residuals, p=1, q=1)
-    garch_model = garch.fit()
+    garch_model = garch.fit(disp='off')
 
     # Use ARIMA to predict mu
     predicted_mu = arima_model.predict(n_periods=horizon)
@@ -280,111 +291,120 @@ def arima_garch_fit_and_sim(data, horizon=1):
     return 1 - np.exp(np.array([a + predicted_mu for a in garch_forecast.simulations.values[0]]))
 
 
-def plot_hosp_for_predicted_tcs(fit: CovidModelFit, total_sample_count, sample_tc_count, max_date, engine, model_params={}, **plot_params):
-    fig, axs = plt.subplots(2, 2)
-    plt.grid(color='lightgray')
+def format_date_axis(ax, interval_months=None, **locator_params):
+    locator = mdates.MonthLocator(interval=interval_months) if interval_months is not None else mdates.AutoDateLocator(**locator_params)
+    formatter = mdates.ConciseDateFormatter(locator)
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(formatter)
+    ax.set_xlabel(None)
 
-    increment = 14
-    max_t = (max_date - dt.datetime(2020, 1, 24)).days
-    tslices = fit.tslices + list(range(fit.tslices[-1] + increment, max_t, 14)) + [max_t]
 
-    sample_tcs = uq_sample_tcs(fit, sample_tc_count)
-    horizon = len(tslices) - 1 - len(sample_tcs[0])
-
-    model = CovidModel(tslices=tslices, engine=engine)
-    model.prep(**model_params)
-    params_df = model.params_as_df
-
-    hosp_sims = pd.DataFrame(index=model.trange)
-    new_hosp_sims = pd.DataFrame(index=model.trange)
-    death_sims = pd.DataFrame(index=model.trange)
-    i = 0
-    for tcs in sample_tcs:
+def plot_kde(data, ax, fill=True, xlabel=None, ci=0.8, **plot_params):
+    # if 'color' in plot_params.keys():
+    #     plot_params['colors'] = plot_params['color']
+    p = sns.kdeplot(data, ax=ax, fill=False, **plot_params)
+    if len(p.get_lines()) > 0:
+        x, y = p.get_lines()[-1].get_data()
         try:
-            next_tcs = arima_garch_fit_and_sim(tcs, horizon=horizon)
-        except ValueError:
-            print(f'COULD NOT PROJECT TCS FOR SAMPLE: {tcs}')
-            continue
-        print(f'Generating predictions for next TC for sampled fitted TCs: {tcs}')
-        for next_tc in next_tcs[:(total_sample_count//sample_tc_count)]:
-            i += 1
-            print(f'Generating and plotting simulation number {i}...')
-            model.set_ef_by_t(list(tcs) + list(next_tc))
-            model.solve_seir()
-            hosp_sims[i] = model.solution_sum('seir')['Ih']
-            new_hosp_sims[i] = (model.solution_ydf.stack(level='age').stack(level='vacc')['I'] * params_df['gamm'] * params_df['hosp']).groupby('t').sum()
-            death_sims[i] = model.solution_sum('seir')['D']
-            modeled(model, ax=axs[0, 0], compartments='Ih', **{'c': 'darkblue', 'alpha': min(1, 10.0/total_sample_count), **plot_params})
+            if ci is not None:
+                for percentile in [0.5 - ci/2, 0.5, 0.5 + ci/2]:
+                    median_i = np.argmax(x > data.quantile(percentile))
+                    ax.vlines(x[median_i], 0, y[median_i], linestyles='dashed', **plot_params)
 
-    axs[0, 0].grid(color='lightgray')
+            mean_i = np.argmax(x > data.mean())
+            ax.vlines(x[mean_i], 0, y[mean_i], linestyles='dotted', **plot_params)
+        except:
+            print('Oops!')
+
+    sns.kdeplot(data, ax=ax, fill=fill, **plot_params)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(None)
+    ax.axes.yaxis.set_ticks([])
+
+
+def mab_projections(engine, fit_id):
+    fig, ax = plt.subplots()
+
+    print('Prepping model...')
+    model = CovidModel([0, 800], engine=engine)
+    model.set_ef_from_db(fit_id)
+    print('Running model and building charts...')
+    model.prep(params='input/params.json')
+    model.solve_seir()
+    modeled(model, 'Ih', c='royalblue', label='Current mAb uptake (14% of eligible)')
+
+    for future_mab_uptake, color, label in zip([0.3, 0.5], ['green', 'deeppink'],
+                                               ['Increase to 30% uptake over 3 weeks',
+                                                'Increase to 50% uptake over 3 weeks']):
+        current_mab_uptake = 0.53 * 0.14
+        mab_eff_hosp = 0.78
+        mab_eff_hlos = 0.28
+        for t in range(650, 800):
+            mab_uptake_at_t = current_mab_uptake + 0.53 * (0.5 - 0.14) * min(1., (t - 650) / (671 - 650))
+            model.set_param('hosp', mult=(1 - mab_eff_hosp * mab_uptake_at_t) / (1 - mab_eff_hosp * current_mab_uptake),
+                            trange=[t])
+            model.set_param('hlos', mult=(1 - mab_eff_hlos * mab_uptake_at_t) / (1 - mab_eff_hlos * current_mab_uptake),
+                            trange=[t])
+        model.build_ode()
+        model.solve_seir()
+        modeled(model, 'Ih', c=color, label=label)
+
+    actual_hosps(engine, color='navy', label='Actual')
+    plt.legend(loc='best')
     locator = mdates.MonthLocator(interval=2)
     formatter = mdates.ConciseDateFormatter(locator)
-    axs[0, 0].xaxis.set_major_locator(locator)
-    axs[0, 0].xaxis.set_major_formatter(formatter)
-    actual_hosps(engine, ax=axs[0, 0])
-    axs[0, 0].set_xlabel(None)
-    axs[0, 0].set_ylabel('Daily Patients Hospitalized with COVID-19')
-
-    hosp_peak = hosp_sims.loc[fit.tslices[-1]:].max(axis=0)
-    axs[0, 1].hist(hosp_peak, weights=np.ones(len(hosp_peak)) / len(hosp_peak), range=(1000, 2400), bins=28)
-    axs[0, 1].yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
-    axs[0, 1].set_xlabel('Hospitalized Patients Peak From Now Through Dec 31, 2021')
-
-    death_total = death_sims.iloc[-1] - death_sims.iloc[fit.tslices[-1]]
-    axs[1, 0].hist(death_total, weights=np.ones(len(hosp_peak)) / len(hosp_peak), color='xkcd:charcoal', range=(600, 2000), bins=28)
-    axs[1, 0].yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
-    axs[1, 0].set_xlabel('Total Deaths From Now Through Dec 31, 2021')
-
-    hosp_peak_t = hosp_sims.loc[fit.tslices[-1]:].idxmax(axis=0)
-    hosp_peak_date = [model.daterange[t] for t in hosp_peak_t]
-    locator = mdates.AutoDateLocator(minticks=3, maxticks=7)
-    formatter = mdates.ConciseDateFormatter(locator, show_offset=False)
-    axs[1, 1].xaxis.set_major_locator(locator)
-    axs[1, 1].xaxis.set_major_formatter(formatter)
-    axs[1, 1].hist(hosp_peak_date, weights=np.ones(len(hosp_peak)) / len(hosp_peak), color='darkgreen')
-    axs[1, 1].yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
-    axs[1, 1].set_xlabel('Day of Hospitalizations Peak From Now Through Dec 31, 2021')
-
-    fig.tight_layout(pad=1.4)
-    # plt.close(fig)
-    return new_hosp_sims
-
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(formatter)
+    ax.set_ylabel('Daily Patients Hospitalized with COVID-19')
+    plt.grid(True)
 
 
 if __name__ == '__main__':
     engine = db_engine()
 
-    # model = CovidModel([0, 900], engine=engine)
-    # model.set_ef_from_db(910)
-    # model.add_tslice(760, 0.0)
-    # model.prep()
-    # model.solve_seir()
-    # modeled(model, 'Ih')
-    # actual_hosps(engine)
-
-    fit = CovidModelFit.from_db(engine, 994)
-    vacc_scens = ['current trajectory', 'increased booster uptake', '75% elig. boosters by Dec 31']
     fig, ax = plt.subplots()
-    new_hosp_dists = pd.DataFrame()
-    for vacc_scen in vacc_scens:
-        new_hosp_sims = plot_hosp_for_predicted_tcs(fit, total_sample_count=200, sample_tc_count=40
-                                    , max_date=dt.datetime(2022, 2, 28)
-                                    , engine=engine
-                                    , model_params={'vacc_proj_params': json.load(open('input/vacc_proj_params.json'))[vacc_scen]})
-        new_hosp_dists[vacc_scen] = new_hosp_sims.loc[(dt.datetime.today() - dt.datetime(2020, 1, 24)).days:].sum()
-        plt.draw()
+    print('Prepping model...')
+    model = CovidModel([0, 800], engine=engine)
+    model.set_ef_from_db(1263)
+    print('Running model and building charts...')
+    model.prep(params='input/params_with_increased_hosp_rate.json')
+    t0 = perf_counter()
+    model.solve_seir(method='LSODA')
+    t1 = perf_counter()
+    print(f'Solved ODE in {t1-t0} seconds.')
+    modeled(model, 'Ih', c='royalblue', label='Current mAb uptake (14% of eligible)')
 
-    sns.displot(new_hosp_dists, ax=ax, kind='kde', fill=True)
-    print(new_hosp_dists.mean())
-    new_hosp_dists.to_csv('output/simulated_new_hosps_by_vacc_scen.csv')
+    # print('Prepping model...')
+    # model = CovidModel([0, 800], engine=engine)
+    # model.set_ef_from_db(1171)
+    # print('Running model and building charts...')
+    # model.prep(params='input/params_with_increased_hosp_rate.json')
+    # model.solve_seir()
+    # modeled(model, 'Ih', c='green')
+    actual_hosps(engine)
 
-    # [plt.close(f) for f in plt.get_fignums() if f != fig.number]
 
+    # fit = CovidModelFit.from_db(engine, 1263)
+    # # fit = CovidModelFit.from_db(engine, 1163)
+    # # fit.fitted_efs[-1] = fit.fitted_efs[-2]
+    # # vacc_scens = ['current trajectory', 'increased booster uptake', '75% elig. boosters by Dec 31']
+    # vacc_scens = ['current trajectory']
+    # new_hosp_dists = pd.DataFrame()
+    # for vacc_scen in vacc_scens:
+    #     new_hosp_sims = plot_hosp_for_predicted_tcs(fit, total_sample_count=20, sample_tc_count=5
+    #                                 , max_date=dt.datetime(2022, 5, 31)
+    #                                 , engine=engine
+    #                                 , model_params={'params': 'input/params_with_increased_hosp_rate.json',
+    #                                 # , model_params={'params': 'input/params.json',
+    #                                                          'vacc_proj_params': json.load(open('input/vacc_proj_params.json'))[vacc_scen]})
+    #     new_hosp_dists[vacc_scen] = new_hosp_sims.loc[(dt.datetime.today() - dt.datetime(2020, 1, 24)).days:].sum()
+    #
+    # sns.displot(new_hosp_dists, kind='kde', fill=True)
+    # print(new_hosp_dists.mean())
+    # new_hosp_dists.to_csv('output/simulated_new_hosps_by_vacc_scen.csv')
+    #
     plt.show()
     exit()
-
-
-
 
     # t0 = perf_counter()
     # model.solve_seir()

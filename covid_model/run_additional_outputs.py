@@ -22,7 +22,7 @@ if __name__ == '__main__':
     for label, proj_params in proj_param_dict.items():
         print(f'Exporting vaccination by age for "{label}" scenario...')
         df = ExternalVacc(engine, fill_from_date=dt.datetime(2020, 1, 24),
-                          fill_to_date=dt.datetime(2021, 12, 31)).fetch('input/past_and_projected_vaccinations.csv',
+                          fill_to_date=dt.datetime(2022, 2, 28)).fetch('input/past_and_projected_vaccinations.csv',
                                                                         proj_params=proj_params, group_pop=gparams['group_pop'])
         # df['is_projected'] = df['is_projected'].fillna(False).astype(int)
         vacc_df_dict[label] = df.groupby(['measure_date', 'age']).sum().rename(columns={'rate': 'first_shot_rate'})
