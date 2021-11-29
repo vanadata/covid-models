@@ -3,7 +3,7 @@ import numpy as np
 import datetime as dt
 import json
 from db import db_engine
-from data_imports import get_hosps_df, get_vaccinations_by_county, ExternalVacc
+from data_imports import get_hosps_df, get_vaccinations_by_county, ExternalVaccWithProjections
 
 if __name__ == '__main__':
     engine = db_engine()
@@ -21,8 +21,8 @@ if __name__ == '__main__':
     vacc_df_dict = {}
     for label, proj_params in proj_param_dict.items():
         print(f'Exporting vaccination by age for "{label}" scenario...')
-        df = ExternalVacc(engine, fill_from_date=dt.datetime(2020, 1, 24),
-                          fill_to_date=dt.datetime(2022, 2, 28)).fetch('input/past_and_projected_vaccinations.csv',
+        df = ExternalVaccWithProjections(engine, fill_from_date=dt.datetime(2020, 1, 24),
+                                         fill_to_date=dt.datetime(2022, 2, 28)).fetch('input/past_and_projected_vaccinations.csv',
                                                                         proj_params=proj_params, group_pop=gparams['group_pop'])
         # df['is_projected'] = df['is_projected'].fillna(False).astype(int)
         vacc_df_dict[label] = df.groupby(['measure_date', 'age']).sum().rename(columns={'rate': 'first_shot_rate'})

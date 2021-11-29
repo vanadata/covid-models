@@ -1,5 +1,5 @@
 from covid_model.data_imports import get_deaths, get_hosps_df, get_hosps_by_age, get_deaths_by_age
-from covid_model.model import CovidModel, CovidModelFit
+from covid_model.model import CovidModel
 from covid_model.db import db_engine
 import scipy.stats as sps
 import matplotlib.pyplot as plt
@@ -89,7 +89,7 @@ def modeled_by_group(model, axs, compartment='Ih', **plot_params):
 
 
 def transmission_control(model, **plot_params):
-    plt.plot(model.tslices[:-1], model.efs, **plot_params)
+    plt.plot(model.fixed_tslices[:-1], model.tc, **plot_params)
 
 
 def re_estimates(model, **plot_params):
@@ -132,21 +132,21 @@ def actual_vs_modeled_deaths_by_group(engine, model, **plot_params):
 
 
 # UQ TC plot
-def uq_tc(fit: CovidModelFit, sample_n=100, **plot_params):
-    # get sample TC values
-    fitted_efs_dist = sps.multivariate_normal(mean=fit.fitted_efs, cov=fit.fitted_efs_cov)
-    samples = fitted_efs_dist.rvs(sample_n)
-    for sample_fitted_efs in samples:
-        plt.plot(fit.tslices[:-1], list(fit.fixed_efs) + list(sample_fitted_efs), **{'marker': 'o', 'linestyle': 'None', 'color': 'darkorange', 'alpha': 0.025, **plot_params})
-
-    plt.xlabel('t')
-    plt.ylabel('TCpb')
+# def uq_tc(fit: CovidModelFit, sample_n=100, **plot_params):
+#     # get sample TC values
+#     fitted_efs_dist = sps.multivariate_normal(mean=fit.fitted_efs, cov=fit.fitted_efs_cov)
+#     samples = fitted_efs_dist.rvs(sample_n)
+#     for sample_fitted_efs in samples:
+#         plt.plot(fit.tslices[:-1], list(fit.fixed_efs) + list(sample_fitted_efs), **{'marker': 'o', 'linestyle': 'None', 'color': 'darkorange', 'alpha': 0.025, **plot_params})
+#
+#     plt.xlabel('t')
+#     plt.ylabel('TCpb')
 
 
 def uq_sample_tcs(fit, sample_n):
-    fitted_efs_dist = sps.multivariate_normal(mean=fit.fitted_efs, cov=fit.fitted_efs_cov)
+    fitted_efs_dist = sps.multivariate_normal(mean=fit.fitted_tc, cov=fit.fitted_efs_cov)
     fitted_efs_samples = fitted_efs_dist.rvs(sample_n)
-    return [list(fit.fixed_efs) + list(sample) for sample in (fitted_efs_samples if sample_n > 1 else [fitted_efs_samples])]
+    return [list(fit.fixed_tc) + list(sample) for sample in (fitted_efs_samples if sample_n > 1 else [fitted_efs_samples])]
 
 
 # UQ sqaghetti plot
@@ -154,11 +154,11 @@ def uq_spaghetti(fit, sample_n=100, tmax=600,
                  tc_shift=0, tc_shift_days=70, tc_shift_date=dt.date.today() + dt.timedelta(2) + dt.timedelta((6-dt.date.today().weekday()) % 7),
                  compartments='Ih', **plot_params):
     # get sample TC values
-    fitted_efs_dist = sps.multivariate_normal(mean=fit.fitted_efs, cov=fit.fitted_efs_cov)
+    fitted_efs_dist = sps.multivariate_normal(mean=fit.fitted_tc, cov=fit.fitted_efs_cov)
     samples = fitted_efs_dist.rvs(sample_n)
 
     # for each sample, solve the model and add a line to the plot
-    model = CovidModel(fit.tslices + [tmax], list(fit.fixed_efs) + list(samples[0]) + [0], engine=engine)
+    model = CovidModel(fit.fixed_tslices + [tmax], list(fit.fixed_tc) + list(samples[0]) + [0], engine=engine)
     # model.set_ef_from_db(fit.fit_id)
     # model.add_tslice(tmax, 0)
     model.prep()
@@ -167,12 +167,12 @@ def uq_spaghetti(fit, sample_n=100, tmax=600,
         # model = base_model.prepped_duplicate()
         current_ef = sample_fitted_efs[-1]
         if tc_shift_days is None:
-            model.set_ef_by_t(list(fit.fixed_efs) + list(sample_fitted_efs) + [current_ef + tc_shift])
+            model.apply_tc(list(fit.fixed_tc) + list(sample_fitted_efs) + [current_ef + tc_shift])
         else:
-            model.set_ef_by_t(list(fit.fixed_efs) + list(sample_fitted_efs) + [current_ef])
+            model.apply_tc(list(fit.fixed_tc) + list(sample_fitted_efs) + [current_ef])
             for i, tc_shift_for_this_day in enumerate(np.linspace(0, tc_shift, tc_shift_days)):
-                model.ef_by_t[(tc_shift_date - model.datemin.date()).days + i] += tc_shift_for_this_day
-            for t in range((tc_shift_date - model.datemin.date()).days + tc_shift_days, tmax):
+                model.ef_by_t[(tc_shift_date - model.start_date.date()).days + i] += tc_shift_for_this_day
+            for t in range((tc_shift_date - model.start_date.date()).days + tc_shift_days, tmax):
                 model.ef_by_t[t] += tc_shift
         # base_model.set_ef_by_t(list(fit.fixed_efs) + list(sample_fitted_efs) + [sample_fitted_efs[-1] + tc_shift])
         model.solve_seir()
@@ -180,19 +180,19 @@ def uq_spaghetti(fit, sample_n=100, tmax=600,
         # plt.plot(model.daterange, model.total_hosps(), **{'color': 'darkblue', 'alpha': 0.025, **plot_params})
 
 # UQ histogram plot
-def uq_histogram(fit: CovidModelFit, sample_n=100, compartments='Ih', from_date=dt.datetime.now(), to_date=dt.datetime.now()+dt.timedelta(days=90)):
-    # get sample TC values
-    fitted_efs_dist = sps.multivariate_normal(mean=fit.fitted_efs, cov=fit.fitted_efs_cov)
-    samples = fitted_efs_dist.rvs(sample_n)
-
-    # for each sample, solve the model and add a line to the plot
-    model = CovidModel(fit.tslices, engine=engine)
-    model.add_tslice((to_date - model.datemin).days, 0)
-    model.prep()
-    for i, sample_fitted_efs in enumerate(samples):
-        print(i)
-        model.set_ef_by_t(list(fit.fixed_efs) + list(sample_fitted_efs) + [sample_fitted_efs[-1] + tc_shift])
-        model.solve_seir()
+# def uq_histogram(fit: CovidModelFit, sample_n=100, compartments='Ih', from_date=dt.datetime.now(), to_date=dt.datetime.now()+dt.timedelta(days=90)):
+#     # get sample TC values
+#     fitted_efs_dist = sps.multivariate_normal(mean=fit.fitted_efs, cov=fit.fitted_efs_cov)
+#     samples = fitted_efs_dist.rvs(sample_n)
+#
+#     # for each sample, solve the model and add a line to the plot
+#     model = CovidModel(fit.tslices, engine=engine)
+#     model.add_tslice((to_date - model.start_date).days, 0)
+#     model.prep()
+#     for i, sample_fitted_efs in enumerate(samples):
+#         print(i)
+#         model.apply_tc(list(fit.fixed_efs) + list(sample_fitted_efs) + [sample_fitted_efs[-1] + tc_shift])
+#         model.solve_seir()
 
 
 def tc_for_given_r_and_vacc(solved_model: CovidModel, t, r, vacc_share):
@@ -227,7 +227,7 @@ def r_for_given_tc_and_vacc(solved_model: CovidModel, t, tc, vacc_share):
 
 def r_equals_1(solved_model: CovidModel, t=None):
     if t is None:
-        t = (dt.datetime.now() - solved_model.datemin).days
+        t = (dt.datetime.now() - solved_model.start_date).days
 
     increment = 0.001
     vacc_space = np.arange(0.3, 0.95, increment)

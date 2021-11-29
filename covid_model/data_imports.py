@@ -10,15 +10,15 @@ from covid_model.utils import get_params
 
 
 def normalize_date(date):
-    return date if type(date) == dt.date else date.date()
+    return date if type(date) == dt.date or date is None else date.date()
 
 
 class ExternalData:
     def __init__(self, engine=None, t0_date=None, fill_from_date=None, fill_to_date=None):
         self.engine = engine
-        self.t0_date = normalize_date(t0_date)
+        self.t0_date = normalize_date(t0_date) if t0_date is not None else None
         self.fill_from_date = normalize_date(fill_from_date) if fill_from_date is not None else normalize_date(t0_date)
-        self.fill_to_date = normalize_date(fill_to_date)
+        self.fill_to_date = normalize_date(fill_to_date) if fill_to_date is not None else None
 
     def fetch(self, fpath=None, rerun=True, **args):
         if rerun:
@@ -33,11 +33,12 @@ class ExternalData:
             df = df.reset_index()
             df['t'] = (pd.to_datetime(df['measure_date']).dt.date - self.t0_date).dt.days
             min_t = min(df['t'])
-            df = df.reset_index().drop(columns=['index', 'measure_date'], errors='ignore').set_index(['t'] + index_names)
+            max_t = max(df['t'])
+            df = df.reset_index().drop(columns=['index', 'level_0', 'measure_date'], errors='ignore').set_index(['t'] + index_names)
 
-            trange = range((self.fill_from_date - self.t0_date).days, (self.fill_to_date - self.t0_date).days + 1)
-            index = pd.MultiIndex.from_product([trange] + [df.index.unique(level=idx) for idx in index_names]) if index_names else range(min_t)
-            empty_df = pd.DataFrame(index=index.set_names(['t'] + index_names))
+            trange = range((self.fill_from_date - self.t0_date).days, (self.fill_to_date - self.t0_date).days + 1 if self.fill_to_date is not None else max_t)
+            index = pd.MultiIndex.from_product([trange] + [df.index.unique(level=idx) for idx in index_names]).set_names(['t'] + index_names) if index_names else range(max_t)
+            empty_df = pd.DataFrame(index=index)
             df = empty_df.join(df, how='left').fillna(0)
 
         return df
@@ -48,10 +49,16 @@ class ExternalData:
 
 class ExternalHosps(ExternalData):
     def fetch_from_db(self):
-        pd.read_sql('select * from cdphe.emresource_hospitalizations', self.engine)
+        return pd.read_sql('select * from cdphe.emresource_hospitalizations', self.engine, parse_dates=['measure_date'])
 
 
 class ExternalVacc(ExternalData):
+    def fetch_from_db(self):
+        sql = open('sql/vaccination_by_age_group_with_boosters_wide.sql', 'r').read()
+        return pd.read_sql(sql, self.engine, index_col=['measure_date', 'age'])
+
+
+class ExternalVaccWithProjections(ExternalData):
     def fetch_from_db(self, proj_params=None, group_pop=None):
         sql = open('sql/vaccination_by_age_group_with_boosters_wide.sql', 'r').read()
 
@@ -98,7 +105,7 @@ class ExternalVacc(ExternalData):
 
                     cumu_vacc += projections.loc[d]
 
-            df = pd.concat([df, projections]).sort_index()
+            df = pd.concat({False: df, True: projections}).rename_axis(index=['is_projected', 'measure_date', 'age']).reorder_levels(['measure_date', 'age', 'is_projected']).sort_index()
 
         return df
 
@@ -108,11 +115,11 @@ class ExternalContactMatrices(ExternalData):
 
 
 # load actual hospitalization data for fitting
-def get_hosps(engine, min_date=dt.datetime(2020, 1, 24)):
-    actual_hosp_df = pd.read_sql(open('sql/emresource_hospitalizations.sql').read(), engine)
-    actual_hosp_df['t'] = ((pd.to_datetime(actual_hosp_df['measure_date']) - min_date) / np.timedelta64(1, 'D')).astype(int)
-    actual_hosp_tmin = actual_hosp_df[actual_hosp_df['currently_hospitalized'].notnull()]['t'].min()
-    return [0] * actual_hosp_tmin + list(actual_hosp_df['currently_hospitalized'])
+# def get_hosps(engine, min_date=dt.datetime(2020, 1, 24)):
+#     actual_hosp_df = pd.read_sql(open('sql/emresource_hospitalizations.sql').read(), engine)
+#     actual_hosp_df['t'] = ((pd.to_datetime(actual_hosp_df['measure_date']) - min_date) / np.timedelta64(1, 'D')).astype(int)
+#     actual_hosp_tmin = actual_hosp_df[actual_hosp_df['currently_hospitalized'].notnull()]['t'].min()
+#     return [0] * actual_hosp_tmin + list(actual_hosp_df['currently_hospitalized'])
 
 
 def get_hosps_df(engine):

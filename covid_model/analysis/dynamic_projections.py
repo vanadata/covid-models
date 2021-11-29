@@ -19,9 +19,9 @@ from charts import plot_kde, modeled, actual_hosps, format_date_axis
 
 
 def uq_sample_tcs(fit, sample_n):
-    fitted_efs_dist = sps.multivariate_normal(mean=fit.fitted_efs, cov=fit.fitted_efs_cov)
+    fitted_efs_dist = sps.multivariate_normal(mean=fit.fitted_tc, cov=fit.fitted_efs_cov)
     fitted_efs_samples = fitted_efs_dist.rvs(sample_n)
-    return [list(fit.fixed_efs) + list(sample) for sample in (fitted_efs_samples if sample_n > 1 else [fitted_efs_samples])]
+    return [list(fit.fixed_tc) + list(sample) for sample in (fitted_efs_samples if sample_n > 1 else [fitted_efs_samples])]
 
 
 def arima_garch_fit_and_sim(data, horizon=1, sims=10, arima_order='auto', use_garch=False):
@@ -101,7 +101,7 @@ def plot_peak_value_vs_date(data, ax, xlabel='Date of Peak', ylabel='Peak Value'
 
 
 def plot_date_of_peak(data, ax, xlabel='Date of Peak'):
-    peak_date = data.iloc[fit.tslices[-1]:].idxmax(axis=0)
+    peak_date = data.iloc[fit.fixed_tslices[-1]:].idxmax(axis=0)
     plot_kde(peak_date, ax=ax, color='darkgreen')
     locator = mdates.AutoDateLocator(minticks=3, maxticks=7)
     formatter = mdates.ConciseDateFormatter(locator, show_offset=False)
@@ -114,7 +114,7 @@ def plot_date_of_peak(data, ax, xlabel='Date of Peak'):
 def get_tc_sims(fit, max_date, sample_count, samples_per_fit_sim=5, plot=False, arima_order='auto', skip=8):
     increment = 14
     max_t = (max_date - dt.datetime(2020, 1, 24)).days
-    tslices = fit.tslices + list(range(fit.tslices[-1] + increment, max_t, 14)) + [max_t]
+    tslices = fit.fixed_tslices + list(range(fit.fixed_tslices[-1] + increment, max_t, 14)) + [max_t]
 
     sample_tcs = uq_sample_tcs(fit, sample_count // samples_per_fit_sim)
     horizon = len(tslices) - 1 - len(sample_tcs[0])
@@ -164,7 +164,7 @@ def get_sims(fit: CovidModelFit, engine, max_date, sample_count, samples_per_fit
         for next_tc in next_tcs[:min(samples_per_fit_sim, sample_count)]:
             i += 1
             print(f'Generating and plotting simulation number {i}...')
-            model.set_ef_by_t(list(tcs) + list(next_tc))
+            model.apply_tc(list(tcs) + list(next_tc))
             model.solve_seir()
             tc_sims[i] = model.ef_by_t
             hosp_sims[i] = model.solution_sum('seir')['Ih']
