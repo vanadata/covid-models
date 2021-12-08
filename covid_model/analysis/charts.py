@@ -74,10 +74,17 @@ def total_hosps(model, group=None, **plot_params):
 def modeled(model, compartments, ax=None, transform=lambda x: x, **plot_params):
     if type(compartments) == str:
         compartments = [compartments]
-    if ax:
+    if ax is not None:
         ax.plot(model.daterange, transform(model.solution_sum('seir')[compartments].sum(axis=1)), **{**plot_params})
     else:
         plt.plot(model.daterange, transform(model.solution_sum('seir')[compartments].sum(axis=1)), **{**plot_params})
+
+
+def modeled_re(model, ax=None, **plot_params):
+    if ax:
+        ax.plot(model.daterange, model.re_estimates, **{**plot_params})
+    else:
+        plt.plot(model.daterange, model.re_estimates, **{**plot_params})
 
 
 def modeled_by_group(model, axs, compartment='Ih', **plot_params):

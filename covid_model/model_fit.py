@@ -12,11 +12,11 @@ from covid_model.model_specs import CovidModelSpecifications
 
 class CovidModelFit:
 
-    def __init__(self, base_specs, engine=None, tc_0=0.75, tc_min=0, tc_max=0.99):
+    def __init__(self, base_specs, engine=None, tc_0=0.75, tc_min=0, tc_max=0.99, new_end_date=dt.date(2022, 5, 31)):
         if isinstance(base_specs, CovidModelSpecifications):
             self.base_specs = base_specs
         elif isinstance(base_specs, int):
-            self.base_specs = CovidModelSpecifications.from_db(engine, base_specs)
+            self.base_specs = CovidModelSpecifications.from_db(engine, base_specs, new_end_date=new_end_date)
         else:
             raise TypeError(f'Invalid type for base_specs: {type(base_specs)}')
 
@@ -55,8 +55,8 @@ class CovidModelFit:
     # def run(self, engine, base_model=None, method='curve_fit', start_date=dt.date(2020, 1, 24), end_date=None, **model_params):
     def run(self, engine, method='curve_fit', window_size=14, look_back=3, last_window_min_size=21, batch_size=None, increment_size=1):
 
-        # if a window_count is provided, use it to determine the end date; otherwise, get it from actual hosps
-        end_t = min(self.base_specs.days, self.actual_hosp.index.max())
+        # get the end date from actual hosps
+        end_t = self.actual_hosp.index.max() + 1
         end_date = self.base_specs.start_date + dt.timedelta(end_t)
 
         # if there's no batch size, set the batch size to be the total number of windows to be fit
@@ -74,6 +74,8 @@ class CovidModelFit:
         tslices = self.base_specs.tslices + list(range(self.base_specs.tslices[-1] + window_size, end_t - last_window_min_size, window_size))
         tc = self.base_specs.tc + [self.tc_0] * (len(tslices) + 1 - len(self.base_specs.tc))
         fitted_tc_cov = None
+        if look_back is None:
+            look_back = len(tslices) + 1
 
         trim_off_end_list = list(range(look_back - batch_size, 0, -increment_size)) + [0]
         for i, trim_off_end in enumerate(trim_off_end_list):

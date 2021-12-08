@@ -60,5 +60,9 @@
   "immune_decay_days_2": 400,
   "nondelta_prevalence": 1,
   "delta_max_efficacy_reduction": 0.6,
-  "unvacc_relative_transm": 1
+  "unvacc_relative_transm": 1,
+  "om_seed": 0,
+  "omicron_transm_mult": 1,
+  "omicron_acq_immune_escape": 0.0,
+  "omicron_vacc_immune_escape": 0.0
 }

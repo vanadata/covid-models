@@ -84,6 +84,7 @@ def main():
 
     # set various parameters
     tmax = run_params.days if run_params.days is not None else 700
+    vacc_scens = ['current trajectory', 'increased booster uptake', '75% elig. boosters by Dec 31']
     primary_vacc_scen = 'current trajectory'
     params_fname = run_params.params if run_params.params is not None else 'input/params.json'
     current_fit_id = run_params.current_fit_id if run_params.current_fit_id is not None else 1824
@@ -98,18 +99,19 @@ def main():
     legacy_outputs = {}
 
     # create models for low- and high-vaccine-uptake scenarios
-    model = CovidModel()
-    specs = CovidModelSpecifications.from_db(engine, 121, new_end_date=model.end_date)
+    model = CovidModel(end_date=(CovidModel.default_start_date + dt.timedelta(days=tmax)).date())
+    specs = CovidModelSpecifications.from_db(engine, current_fit_id, new_end_date=model.end_date)
+    specs.base_spec_id = current_fit_id
     specs.tags = {'batch': batch}
     vacc_proj_dict = json.load(open('input/vacc_proj_params.json'))
-    for vacc_scen, proj_params in vacc_proj_dict.items():
+    for vacc_scen in vacc_scens:
         print(f'Prepping model with vaccine projection scenario "{vacc_scen}"...')
-        specs.set_vacc_proj(proj_params)
+        specs.set_vacc_proj(vacc_proj_dict[vacc_scen])
         model.prep(specs=specs)
         print(f'Running scenarios...')
-        model.specifications.tags.update({'run_type': 'Vaccination Scenario', 'vacc_cap': vacc_scen})
+        model.specifications.tags.update({'run_type': 'Vaccination Scenario', 'vacc_cap': vacc_scen, 'tc_shift': 'no shift', 'tc_shift_date': 'no_shift'})
         run_model(model, engine, legacy_output_dict=legacy_outputs)
-        if vacc_scen == 'current trajectory':
+        if vacc_scen == primary_vacc_scen:
             model.specifications.tags.update({'run_type': 'Current', 'vacc_cap': vacc_scen})
             run_model(model, engine, legacy_output_dict=legacy_outputs)
 

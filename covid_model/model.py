@@ -23,7 +23,7 @@ class CovidModel(ODEBuilder):
     param_attr_names = ('age', 'vacc')
 
     # the starting date of the model
-    # start_date = dt.datetime(2020, 1, 24)
+    default_start_date = dt.datetime(2020, 1, 24)
 
     # def __init__(self, tslices=None, efs=None, fit_id=None, engine=None, **ode_builder_args):
     def __init__(self, start_date=dt.date(2020, 1, 24), end_date=dt.date(2022, 5, 31), **ode_builder_args):
@@ -108,7 +108,7 @@ class CovidModel(ODEBuilder):
             self.specifications = specs
 
         # set TC
-        self.apply_tc()
+        self.apply_tc(suppress_ode_rebuild=True)
 
         # prep general parameters
         for name, val in self.specifications.model_params.items():
@@ -119,42 +119,41 @@ class CovidModel(ODEBuilder):
                     v = {a: av[i] for a, av in val['value'].items()} if isinstance(val['value'], dict) else val['value'][i]
                     self.set_param_using_age_dict(name, v, trange=range(tmin, tmax))
 
-        # prep vacc rates, including projections (vacc_rate_df)
+        # get vacc rates and efficacy from specifications
         vacc_per_unvacc = self.specifications.get_vacc_rate_per_unvacc()
         vacc_mean_efficacy = self.specifications.get_vacc_mean_efficacy()
         vacc_fail_per_vacc = self.specifications.get_vacc_fail_per_vacc()
         vacc_fail_reduction_per_fail = self.specifications.get_vacc_fail_reduction_per_vacc_fail()
+
+        # convert to dictionaries for performance lookup
+        vacc_per_unvacc_dict = vacc_per_unvacc.to_dict()
+        vacc_mean_efficacy_dict = vacc_mean_efficacy.to_dict()
+        vacc_fail_reduction_per_fail_dict = vacc_fail_reduction_per_fail.to_dict()
+
+        # set the fail rate and vacc per unvacc rate for each dose
+        self.set_param('vacc_eff', 0, {'vacc': 'unvacc'})
+        self.set_param('vacc_eff', 0, {'vacc': 'vacc_fail'})
         for shot in vacc_per_unvacc.columns:
             for age in self.attr['age']:
                 self.set_param(f'{shot}_fail_rate', vacc_fail_per_vacc[shot][age], {'age': age})
                 for t in self.trange:
                     for vacc in ['unvacc', 'vacc_fail']:
-                        self.set_param(f'{shot}_per_unvacc', vacc_per_unvacc.loc[(t, age), shot], {'age': age, 'vacc': vacc}, trange=[t])
+                        self.set_param(f'{shot}_per_unvacc', vacc_per_unvacc_dict[shot][(t, age)], {'age': age, 'vacc': vacc}, trange=[t])
 
-        # set the fail rate for each dose
-        for shot in vacc_per_unvacc.columns:
-            for age in self.attr['age']:
-                self.set_param(f'{shot}_fail_rate', vacc_fail_per_vacc[shot][age], {'age': age})
+        # set hospitalization and mortality to 0 among the vacc successes
+        self.set_param('hosp', 0, attrs={'vacc': 'vacc'})
+        self.set_param('dnh', 0, attrs={'vacc': 'vacc'})
 
-        # set vacc rate, vacc mean efficacy, and fail reduction rate
-        self.set_param('vacc_eff', 0, {'vacc': 'unvacc'})
-        self.set_param('vacc_eff', 0, {'vacc': 'vacc_fail'})
+        # set vacc efficacy and fail reduciton over time
         for age in self.attr['age']:
             for t in self.trange:
-                for shot in vacc_per_unvacc.columns:
-                    for vacc in ['unvacc', 'vacc_fail']:
-                        self.set_param(f'{shot}_per_unvacc', vacc_per_unvacc.loc[(t, age), shot], {'age': age, 'vacc': vacc}, trange=[t])
-                self.set_param('vacc_eff', vacc_mean_efficacy.loc[(t, age)], {'age': age, 'vacc': 'vacc'}, trange=[t])
-                self.set_param('vacc_fail_reduction_per_vacc_fail', vacc_fail_reduction_per_fail.loc[(t, age)], {'age': age, 'vacc': 'vacc_fail'}, trange=[t])
-                # set hospitalization and mortality to 0 among the vacc successes
-                self.params[t][(age, 'vacc')]['hosp'] *= 0
-                self.params[t][(age, 'vacc')]['dnh'] *= 0
+                self.set_param('vacc_eff', vacc_mean_efficacy_dict[(t, age)], {'age': age, 'vacc': 'vacc'}, trange=[t])
+                self.set_param('vacc_fail_reduction_per_vacc_fail', vacc_fail_reduction_per_fail_dict[(t, age)], {'age': age, 'vacc': 'vacc_fail'}, trange=[t])
 
         # alter parameters based on timeseries effects
         multipliers = self.specifications.get_timeseries_effect_multipliers()
         for param, mult_by_t in multipliers.to_dict().items():
             for t, mult in mult_by_t.items():
-                # t = (date - self.datemin).days
                 if t in self.trange:
                     self.set_param(param, mult=mult, trange=[t])
 
@@ -200,7 +199,7 @@ class CovidModel(ODEBuilder):
                 self.set_param(name, v, attrs={'age': age}, trange=trange)
 
     # set ef by slice and lookup dicts
-    def apply_tc(self, tc=None, tslices=None):
+    def apply_tc(self, tc=None, tslices=None, suppress_ode_rebuild=False):
         if tslices is not None:
             self.specifications.tslices = tslices
         if tc is not None:
@@ -214,7 +213,7 @@ class CovidModel(ODEBuilder):
 
         # the ODE needs to be rebuilt with the new TC values
         # it would be good to refactor the ODEBuilder to support fittable parameters that are easier to adjust cheaply
-        if len(self.terms) > 0:
+        if len(self.terms) > 0 and not suppress_ode_rebuild:
             self.rebuild_ode_with_new_tc()
 
     # # extend the time range with an additional slice; should maybe change how this works to return a new CovidModel instead
@@ -301,7 +300,7 @@ class CovidModel(ODEBuilder):
         return sum_df['E'] - sum_df['E'].shift(1) + sum_df['E'].shift(1) / self.specifications.model_params['alpha']
 
     # write to covid_model.results in Postgres
-    def write_to_db(self, engine=None, new_spec=False):
+    def write_to_db(self, engine=None, new_spec=False, sim_id=None):
 
         # if there's no existing fit assigned, create a new fit and assign that one
         if self.specifications.spec_id is None or new_spec:
@@ -313,8 +312,7 @@ class CovidModel(ODEBuilder):
         # df = self.solution_ydf.stack(level=self.param_attr_names).join(ef_series).join(oef_series)
         df = self.solution_ydf.stack(level=self.param_attr_names)
 
-        # add fit_id and created_at date
-        df['spec_id'] = self.specifications.spec_id
+        # created_at date
         df['created_at'] = dt.datetime.now()
 
         # add params
@@ -325,8 +323,16 @@ class CovidModel(ODEBuilder):
         df['R'] += df['R2']
         del df['R2']
 
+        # if a sim_id is provided, insert it as a simulation result
+        if sim_id is None:
+            table = 'results'
+            df['spec_id'] = self.specifications.spec_id
+        else:
+            table = 'simulation_results'
+            df['sim_id'] = sim_id
+
         # write to database
-        results = df.to_sql('results'
+        results = df.to_sql(table
                   , con=engine, schema='covid_model'
                   , index=True, if_exists='append', method='multi')
 

@@ -3,6 +3,7 @@ import numpy as np
 import datetime as dt
 import json
 
+import scipy.stats as sps
 from sqlalchemy import MetaData
 
 from covid_model.db import db_engine
@@ -60,7 +61,7 @@ class CovidModelSpecifications:
         specs.spec_id = row['spec_id']
         specs.base_spec_id = row['base_spec_id']
 
-        specs.set_tc(row['tslices'], row['tc'])
+        specs.set_tc(tslices=row['tslices'], tc=row['tc'], tc_cov=row['tc_cov'])
         specs.set_model_params(row['model_params'])
 
         specs.actual_vacc_df = pd.concat({k: pd.DataFrame(v) for k, v in row['vacc_actual'].items()}, axis=0).unstack(0).stack(0).rename_axis(index=['t', 'age'])
@@ -172,15 +173,17 @@ class CovidModelSpecifications:
             prevalence_df = pd.DataFrame(index=pd.date_range(self.start_date, self.end_date))
 
             for effect_specs in self.timeseries_effects[effect_type]:
-                start_date = dt.datetime.strptime(effect_specs['start_date'], '%y-%m-%d')
-                end_date = start_date + dt.timedelta(days=len(effect_specs['prevalence']) - 1)
+                start_date = dt.datetime.strptime(effect_specs['start_date'], '%y-%m-%d').date()
+                end_date = self.end_date
+                # end_date = start_date + dt.timedelta(days=len(effect_specs['prevalence']) - 1)
 
                 prevalence = effect_specs['prevalence']
+                prevalence = prevalence[:(end_date - start_date).days]
                 while len(prevalence) < (end_date - start_date).days:
                     prevalence.append(prevalence[-1])
 
                 prevalence_df[effect_specs['effect_name']] = 0
-                prevalence_df.loc[start_date:end_date, effect_specs['effect_name']] = prevalence
+                prevalence_df.loc[start_date:(end_date - dt.timedelta(days=1)), effect_specs['effect_name']] = prevalence
                 multiplier_dict[effect_specs['effect_name']] = {**{param: 1.0 for param in params}, **effect_specs['multipliers']}
 
             prevalence_df = prevalence_df.sort_index()

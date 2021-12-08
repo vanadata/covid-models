@@ -14,7 +14,7 @@ import pmdarima
 import arch
 
 from covid_model.db import db_engine
-from covid_model.model import CovidModelFit, CovidModel
+from covid_model.model import CovidModel
 from charts import plot_kde, modeled, actual_hosps, format_date_axis
 
 
