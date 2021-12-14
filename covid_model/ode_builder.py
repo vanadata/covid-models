@@ -5,6 +5,12 @@ import sympy as sym
 from sympy.parsing.sympy_parser import parse_expr
 from time import perf_counter
 import scipy.integrate as spi
+import scipy.sparse as spsp
+# from blist import blist
+from operator import itemgetter
+from itertools import count
+import math
+import numbers
 
 
 class ODEFlowTerm:
@@ -12,38 +18,87 @@ class ODEFlowTerm:
         self.from_cmpt_idx = from_cmpt_idx
         self.to_cmpt_idx = to_cmpt_idx
         self.coef_by_t = coef_by_t
+        self.is_scaled_by_cmpts = scale_by_cmpts_idxs is not None and scale_by_cmpts_idxs != []
         self.scale_by_cmpt_idxs = scale_by_cmpts_idxs
-        self.scale_by_cmpts_coef_by_t = scale_by_cmpts_coef_by_t if scale_by_cmpts_coef_by_t is not None else {t: np.array([1]*len(self.scale_by_cmpt_idxs)) for t in range(len(self.coef_by_t.keys()))}
+        # self.scale_by_cmpts_coef_by_t = scale_by_cmpts_coef_by_t if scale_by_cmpts_coef_by_t is not None else {t: np.array([1]*len(self.scale_by_cmpt_idxs)) for t in range(len(self.coef_by_t.keys()))}
+        self.scale_by_cmpts_coef_by_t = scale_by_cmpts_coef_by_t
 
         self.solution = None
         self.solution_y = None
         self.solution_ydf = None
 
-    def dy(self, t, y):
-        dy = np.zeros(len(y))
-        dy[self.from_cmpt_idx] -= y[self.from_cmpt_idx] * self.coef_by_t[t] * (sum(y.take(self.scale_by_cmpt_idxs) * self.scale_by_cmpts_coef_by_t[t]) if self.scale_by_cmpt_idxs else 1)
-        dy[self.to_cmpt_idx] += y[self.from_cmpt_idx] * self.coef_by_t[t] * (sum(y.take(self.scale_by_cmpt_idxs) * self.scale_by_cmpts_coef_by_t[t]) if self.scale_by_cmpt_idxs else 1)
-        return dy
+    # def flow_rate(self, t, y):
+    #     if self.scale_by_cmpt_idxs:
+    #         if self.scale_by_cmpts_coef_by_t:
+    #             return self.coef_by_t[t] * sum(a * b for a, b in zip(itemgetter(*self.scale_by_cmpt_idxs)(y), self.scale_by_cmpts_coef_by_t[t]))
+    #         else:
+    #             return self.coef_by_t[t] * sum(itemgetter(*self.scale_by_cmpt_idxs)(y))
+    #     else:
+    #         return self.coef_by_t[t]
+
+    def flow_val(self, t_int, y):
+        if self.is_scaled_by_cmpts:
+            if self.scale_by_cmpts_coef_by_t:
+                return y[self.from_cmpt_idx] * self.coef_by_t[t_int] * sum(a * b for a, b in zip(itemgetter(*self.scale_by_cmpt_idxs)(y), self.scale_by_cmpts_coef_by_t[t_int]))
+            else:
+                return y[self.from_cmpt_idx] * self.coef_by_t[t_int] * sum(itemgetter(*self.scale_by_cmpt_idxs)(y))
+        else:
+            # print('MOO')
+            # print(y)
+            # print(self.from_cmpt_idx)
+            # print(y[self.from_cmpt_idx])
+            # print(self.coef_by_t)
+            # print(t_int)
+            # print(self.coef_by_t[t_int])
+            # print(y[self.from_cmpt_idx] * self.coef_by_t[t_int])
+            return y[self.from_cmpt_idx] * self.coef_by_t[t_int]
 
     def jacobian(self, t, y):
-        jac = np.zeros((len(y), len(y)))
-        jac[self.from_cmpt_idx, self.from_cmpt_idx] -= self.coef_by_t[t] * (sum(y.take(self.scale_by_cmpt_idxs) * self.scale_by_cmpts_coef_by_t[t]) if self.scale_by_cmpt_idxs else 1)
-        jac[self.to_cmpt_idx, self.from_cmpt_idx] += self.coef_by_t[t] * (sum(y.take(self.scale_by_cmpt_idxs) * self.scale_by_cmpts_coef_by_t[t]) if self.scale_by_cmpt_idxs else 1)
-        if self.scale_by_cmpt_idxs is not None and len(self.scale_by_cmpt_idxs) > 0:
-            for sbc_idx, sbc_coef in zip(self.scale_by_cmpt_idxs, self.scale_by_cmpts_coef_by_t[t]):
-                jac[self.from_cmpt_idx, sbc_idx] -= self.coef_by_t[t] * sbc_coef * y[self.from_cmpt_idx]
-                jac[self.to_cmpt_idx, sbc_idx] += self.coef_by_t[t] * sbc_coef * y[self.from_cmpt_idx]
+        jac = spsp.lil_matrix((len(y), len(y)))
+        if self.scale_by_cmpt_idxs is None or len(self.scale_by_cmpt_idxs) > 0:
+            jac[self.from_cmpt_idx, self.from_cmpt_idx] = -self.coef_by_t[t]
+            jac[self.to_cmpt_idx, self.from_cmpt_idx] = self.coef_by_t[t]
+        else:
+            if self.scale_by_cmpts_coef_by_t is not None:
+                for sbc_idx, sbc_coef in zip(self.scale_by_cmpt_idxs, self.scale_by_cmpts_coef_by_t[t]):
+                    jac[self.from_cmpt_idx, self.from_cmpt_idx] -= self.coef_by_t[t] * sbc_coef * y[sbc_idx]
+                    jac[self.to_cmpt_idx, self.from_cmpt_idx] += self.coef_by_t[t] * sbc_coef * y[sbc_idx]
+                    jac[self.from_cmpt_idx, sbc_idx] = -self.coef_by_t[t] * sbc_coef * y[self.from_cmpt_idx]
+                    jac[self.to_cmpt_idx, sbc_idx] = self.coef_by_t[t] * sbc_coef * y[self.from_cmpt_idx]
+            else:
+                for sbc_idx in self.scale_by_cmpt_idxs:
+                    jac[self.from_cmpt_idx, self.from_cmpt_idx] -= self.coef_by_t[t] * y[sbc_idx]
+                    jac[self.to_cmpt_idx, self.from_cmpt_idx] += self.coef_by_t[t] * y[sbc_idx]
+                    jac[self.from_cmpt_idx, sbc_idx] = -self.coef_by_t[t] * y[self.from_cmpt_idx]
+                    jac[self.to_cmpt_idx, sbc_idx] = self.coef_by_t[t] * y[self.from_cmpt_idx]
 
         return jac
 
     def non_linear_jacobian(self, t, y):
-        jac = np.zeros((len(y), len(y)))
-        if self.scale_by_cmpt_idxs is not None and len(self.scale_by_cmpt_idxs) > 0:
+        jac = spsp.lil_matrix((len(y), len(y)))
+
+        if self.scale_by_cmpts_coef_by_t is not None:
             for sbc_idx, sbc_coef in zip(self.scale_by_cmpt_idxs, self.scale_by_cmpts_coef_by_t[t]):
-                jac[self.from_cmpt_idx, sbc_idx] -= self.coef_by_t[t] * sbc_coef * y[self.from_cmpt_idx]
-                jac[self.to_cmpt_idx, sbc_idx] += self.coef_by_t[t] * sbc_coef * y[self.from_cmpt_idx]
+                jac[self.from_cmpt_idx, sbc_idx] = self.coef_by_t[t] * sbc_coef * y[self.from_cmpt_idx]
+                jac[self.to_cmpt_idx, sbc_idx] = self.coef_by_t[t] * sbc_coef * y[self.from_cmpt_idx]
+        else:
+            for sbc_idx in self.scale_by_cmpt_idxs:
+                jac[self.from_cmpt_idx, sbc_idx] = self.coef_by_t[t] * y[self.from_cmpt_idx]
+                jac[self.to_cmpt_idx, sbc_idx] = self.coef_by_t[t] * y[self.from_cmpt_idx]
 
         return jac
+
+
+class ConstantODEFlowTerm(ODEFlowTerm):
+    def __init__(self, from_cmpt_idx, to_cmpt_idx, constant_by_t):
+        ODEFlowTerm.__init__(self, from_cmpt_idx=from_cmpt_idx, to_cmpt_idx=to_cmpt_idx, coef_by_t=None,
+                             scale_by_cmpts_idxs=None, scale_by_cmpts_coef_by_t=None)
+
+        self.constant_by_t = constant_by_t
+
+    def flow_val(self, t, y):
+        return self.constant_by_t[t]
+
 
 class ODEBuilder:
     """
@@ -96,18 +151,22 @@ class ODEBuilder:
         self.compartments_as_index = pd.MultiIndex.from_product(attributes.values(), names=attributes.keys())
         self.compartments = list(self.compartments_as_index)
         self.cmpt_idx_lookup = pd.Series(index=self.compartments_as_index, data=range(len(self.compartments_as_index))).to_dict()
+        self.length = len(self.cmpt_idx_lookup)
 
         self.param_attr_names = list(param_attr_names if param_attr_names is not None else self.attr_names)
         self.param_compartments = list(set(tuple(attr_val for attr_val, attr_name in zip(cmpt, self.attr_names) if attr_name in self.param_attr_names) for cmpt in self.compartments))
 
         self.params = {t: {pcmpt: {} for pcmpt in self.param_compartments} for t in self.trange}
+        self.jac_sparsity = spsp.lil_matrix((self.length, self.length), dtype=int)
+        self.jac_fixed_by_t = {}
+
         # self.jacobians = {t: np.zeros((self.length, self.length)) for t in self.trange}
         # self.linear_jacobians_by_t = {}
         self.terms = []
 
-    @property
-    def length(self):
-        return len(self.cmpt_idx_lookup)
+    # @property
+    # def length(self):
+    #     return len(self.cmpt_idx_lookup)
 
     @property
     def params_as_df(self):
@@ -125,21 +184,19 @@ class ODEBuilder:
     def filter_cmpts_by_attrs(self, attrs, is_param_cmpts=False):
         return [cmpt for cmpt in (self.param_compartments if is_param_cmpts else self.compartments) if self.does_cmpt_have_attrs(cmpt, attrs, is_param_cmpts)]
 
-    def set_param(self, name, val, attrs=None, trange=None):
+    def set_param(self, name, val=None, attrs=None, trange=None, mult=None):
+        if type(val if val is not None else mult) not in (int, float, np.float64):
+            raise TypeError(f'Parameter value (or multiplier) must be numeric; {val if val is not None else mult} is {type(val if val is not None else mult)}')
         if trange is None:
             actual_trange = self.trange
         else:
             actual_trange = set(self.trange).intersection(trange)
         for cmpt in self.filter_cmpts_by_attrs(attrs, is_param_cmpts=True) if attrs else self.param_compartments:
             for t in actual_trange:
-                self.params[t][cmpt][name] = val
-
-    def apply_attr_mults(self, attr_name, attr_val, param_mults):
-        for t, params in self.params.keys():
-            for cmpt, p in params:
-                if cmpt[self.attr_param_level(attr_name)] == attr_val:
-                    for param, mult in param_mults.items():
-                        p[param] *= mult
+                if val is not None:
+                    self.params[t][cmpt][name] = val
+                else:
+                    self.params[t][cmpt][name] *= mult
 
     def calc_coef_by_t(self, coef, cmpt):
 
@@ -175,7 +232,13 @@ class ODEBuilder:
         for i in sorted(to_delete, reverse=True):
             del self.terms[i]
 
-    def add_flow(self, from_cmpt, to_cmpt, coef, scale_by_cmpts=None, scale_by_cmpts_coef=None):
+    def add_flow(self, from_cmpt, to_cmpt, coef=None, scale_by_cmpts=None, scale_by_cmpts_coef=None, constant=None):
+        self.jac_sparsity[self.cmpt_idx_lookup[from_cmpt], self.cmpt_idx_lookup[from_cmpt]] = 1
+        self.jac_sparsity[self.cmpt_idx_lookup[to_cmpt], self.cmpt_idx_lookup[from_cmpt]] = 1
+        if scale_by_cmpts:
+            for scale_by_cmpt in scale_by_cmpts:
+                self.jac_sparsity[self.cmpt_idx_lookup[from_cmpt], self.cmpt_idx_lookup[scale_by_cmpt]] = 1
+                self.jac_sparsity[self.cmpt_idx_lookup[to_cmpt], self.cmpt_idx_lookup[scale_by_cmpt]] = 1
         if len(from_cmpt) < len(self.attributes.keys()):
             raise ValueError(f'Origin compartment `{from_cmpt}` does not have the right number of attributes.')
         if len(to_cmpt) < len(self.attributes.keys()):
@@ -185,32 +248,69 @@ class ODEBuilder:
                 if len(cmpt) < len(self.attributes.keys()):
                     raise ValueError(f'Scaling compartment `{cmpt}` does not have the right number of attributes.')
 
-        # if from_cmpt == ('S', '0-19', 'unvacc') and to_cmpt == ('E', '0-19', 'unvacc'):
-        #     print(coef)
-        #     exit()
+        if coef is not None:
+            self.terms.append(ODEFlowTerm(
+                from_cmpt_idx=self.cmpt_idx_lookup[from_cmpt],
+                to_cmpt_idx=self.cmpt_idx_lookup[to_cmpt],
+                coef_by_t=self.calc_coef_by_t(coef, from_cmpt),
+                scale_by_cmpts_idxs=[self.cmpt_idx_lookup[cmpt] for cmpt in scale_by_cmpts] if scale_by_cmpts is not None else [],
+                scale_by_cmpts_coef_by_t=pd.DataFrame([self.calc_coef_by_t(c, from_cmpt) for c in scale_by_cmpts_coef]).to_dict(orient='list') if scale_by_cmpts_coef is not None else None))
 
-        self.terms.append(ODEFlowTerm(
-            from_cmpt_idx=self.cmpt_idx_lookup[from_cmpt],
-            to_cmpt_idx=self.cmpt_idx_lookup[to_cmpt],
-            coef_by_t=self.calc_coef_by_t(coef, from_cmpt),
-            scale_by_cmpts_idxs=[self.cmpt_idx_lookup[cmpt] for cmpt in scale_by_cmpts] if scale_by_cmpts is not None else [],
-            scale_by_cmpts_coef_by_t=pd.DataFrame([self.calc_coef_by_t(c, from_cmpt) for c in scale_by_cmpts_coef]).to_dict(orient='list') if scale_by_cmpts_coef is not None else None))
+        if constant is not None:
+            self.terms.append(ConstantODEFlowTerm(
+                from_cmpt_idx=self.cmpt_idx_lookup[from_cmpt],
+                to_cmpt_idx=self.cmpt_idx_lookup[to_cmpt],
+                constant_by_t=self.calc_coef_by_t(constant, from_cmpt)
+            ))
+
+    def precalc_jacobians(self):
+        for t in self.trange:
+            self.jac_fixed_by_t[t] = spsp.lil_matrix((self.length, self.length))
+            for term in self.terms:
+                if term.scale_by_cmpt_idxs is None or len(term.scale_by_cmpt_idxs) == 0:
+                    self.jac_fixed_by_t[t][term.from_cmpt_idx, term.from_cmpt_idx] -= term.coef_by_t[t]
+                    self.jac_fixed_by_t[t][term.to_cmpt_idx, term.from_cmpt_idx] += term.coef_by_t[t]
 
     def jacobian(self, t, y):
         t_int = min(np.floor(t), len(self.trange) - 1)
-        return sum(term.jacobian(t_int, y) for term in self.terms)
+        jac = spsp.lil_matrix((self.length, self.length))
+        for term in self.terms:
+            if term.scale_by_cmpt_idxs is None or len(term.scale_by_cmpt_idxs) == 0:
+                jac[term.from_cmpt_idx, term.from_cmpt_idx] -= term.coef_by_t[t_int]
+                jac[term.to_cmpt_idx, term.from_cmpt_idx] += term.coef_by_t[t_int]
+            else:
+                for sbc_idx, sbc_coef in zip(term.scale_by_cmpt_idxs, term.scale_by_cmpts_coef_by_t[t_int] if term.scale_by_cmpts_coef_by_t is not None else [1] * len(term.scale_by_cmpt_idxs)):
+                    jac[term.from_cmpt_idx, term.from_cmpt_idx] -= term.coef_by_t[t_int] * sbc_coef * y[sbc_idx]
+                    jac[term.to_cmpt_idx, term.from_cmpt_idx] += term.coef_by_t[t_int] * sbc_coef * y[sbc_idx]
+                    jac[term.from_cmpt_idx, sbc_idx] -= -term.coef_by_t[t_int] * sbc_coef * y[term.from_cmpt_idx]
+                    jac[term.to_cmpt_idx, sbc_idx] += term.coef_by_t[t_int] * sbc_coef * y[term.from_cmpt_idx]
+
+        return jac
 
     def y0_from_dict(self, y0_dict):
-        y0 = np.zeros(self.length)
+        y0 = [0]*self.length
         for cmpt, n in y0_dict.items():
             y0[self.cmpt_idx_lookup[cmpt]] = n
         return y0
 
     def ode(self, t, y):
-        dy = np.zeros(self.length)
-        t_int = min(np.floor(t), len(self.trange) - 1)
+        dy = [0] * self.length
+        t_int = min(math.floor(t), len(self.trange) - 1)
+
         for term in self.terms:
-            dy += term.dy(t_int, y)
+            val = term.flow_val(t_int, y)
+            # if term.is_scaled_by_cmpts:
+            #     if term.scale_by_cmpts_coef_by_t:
+            #         val = y[term.from_cmpt_idx] * term.coef_by_t[t_int] * sum(a * b for a, b in
+            #                                                                zip(itemgetter(*term.scale_by_cmpt_idxs)(y),
+            #                                                                    term.scale_by_cmpts_coef_by_t[t_int]))
+            #     else:
+            #         val = y[term.from_cmpt_idx] * term.coef_by_t[t_int] * sum(itemgetter(*term.scale_by_cmpt_idxs)(y))
+            # else:
+            #     val = y[term.from_cmpt_idx] * term.coef_by_t[t_int]
+
+            dy[term.from_cmpt_idx] -= val
+            dy[term.to_cmpt_idx] += val
 
         return dy
 
@@ -220,7 +320,8 @@ class ODEBuilder:
             t_span=[min(self.trange), max(self.trange)],
             y0=self.y0_from_dict(y0_dict),
             t_eval=self.trange,
-            # jac=self.jacobian if method != 'RK45' else None,
+            # jac_sparsity=self.jac_sparsity,
+            # jac=self.jacobian,
             method=method)
         if not self.solution.success:
             raise RuntimeError(f'ODE solver failed with message: {self.solution.message}')

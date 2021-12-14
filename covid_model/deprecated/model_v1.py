@@ -561,7 +561,7 @@ class CovidModelFit:
     # runs the model using a given set of efs, and returns the modeled hosp values (which will be fit to actual hosp data)
     def run_model_and_get_total_hosps(self, ef_by_slice):
         extended_ef_by_slice = self.fixed_efs + list(ef_by_slice)
-        self.model.set_ef_by_t(extended_ef_by_slice)
+        self.model.apply_tc(extended_ef_by_slice)
         self.model.solve_seir()
         return self.model.total_hosps()
 
@@ -581,7 +581,7 @@ class CovidModelFit:
     def run(self, engine, method='curve_fit', **model_params):
 
         if self.actual_hosp is None:
-            self.actual_hosp = ExternalHosps(engine, self.model.datemin).fetch('emresource_hosps.csv')
+            self.actual_hosp = ExternalHosps(engine, self.model.start_date).fetch('emresource_hosps.csv')
 
         self.model = CovidModel(tslices=self.tslices, efs=self.fixed_efs + self.fit_params['efs0'], engine=engine)
         self.model.prep(**model_params)

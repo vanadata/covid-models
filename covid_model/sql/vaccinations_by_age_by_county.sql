@@ -12,6 +12,7 @@ select
     , coalesce(round(sum(v.first_dose_rate - v.jnj_dose_rate)), 0) as mrna_first_doses_given
     , coalesce(round(sum(v.final_dose_rate - v.jnj_dose_rate)), 0) as mrna_second_doses_given
     , coalesce(round(sum(v.jnj_dose_rate)), 0) as jnj_doses_given
+    , coalesce(round(sum(v.booster_dose_rate)), 0) as booster_doses_given
 from cdphe.covid19_vaccinations_by_age_by_county v
 join geo_dev.us_counties c using (county_id)
 group by 1, 2, 3, 4

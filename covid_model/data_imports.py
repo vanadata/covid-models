@@ -5,16 +5,20 @@ import json
 import scipy.integrate as spi
 import scipy.optimize as spo
 import matplotlib.pyplot as plt
-from db import db_engine
-from utils import get_params
+from covid_model.db import db_engine
+from covid_model.utils import get_params
+
+
+def normalize_date(date):
+    return date if type(date) == dt.date or date is None else date.date()
 
 
 class ExternalData:
     def __init__(self, engine=None, t0_date=None, fill_from_date=None, fill_to_date=None):
         self.engine = engine
-        self.t0_date = t0_date
-        self.fill_from_date = fill_from_date if fill_from_date is not None else t0_date
-        self.fill_to_date = fill_to_date
+        self.t0_date = normalize_date(t0_date) if t0_date is not None else None
+        self.fill_from_date = normalize_date(fill_from_date) if fill_from_date is not None else normalize_date(t0_date)
+        self.fill_to_date = normalize_date(fill_to_date) if fill_to_date is not None else None
 
     def fetch(self, fpath=None, rerun=True, **args):
         if rerun:
@@ -27,13 +31,14 @@ class ExternalData:
         if self.t0_date is not None:
             index_names = [idx for idx in df.index.names if idx not in (None, 'measure_date')]
             df = df.reset_index()
-            df['t'] = (pd.to_datetime(df['measure_date']).dt.date - self.t0_date.date()).dt.days
+            df['t'] = (pd.to_datetime(df['measure_date']).dt.date - self.t0_date).dt.days
             min_t = min(df['t'])
-            df = df.reset_index().drop(columns=['index', 'measure_date'], errors='ignore').set_index(['t'] + index_names)
+            max_t = max(df['t'])
+            df = df.reset_index().drop(columns=['index', 'level_0', 'measure_date'], errors='ignore').set_index(['t'] + index_names)
 
-            trange = range((self.fill_from_date - self.t0_date).days, (self.fill_to_date - self.t0_date).days + 1)
-            index = pd.MultiIndex.from_product([trange] + [df.index.unique(level=idx) for idx in index_names]) if index_names else range(min_t)
-            empty_df = pd.DataFrame(index=index.set_names(['t'] + index_names))
+            trange = range((self.fill_from_date - self.t0_date).days, (self.fill_to_date - self.t0_date).days + 1 if self.fill_to_date is not None else max_t)
+            index = pd.MultiIndex.from_product([trange] + [df.index.unique(level=idx) for idx in index_names]).set_names(['t'] + index_names) if index_names else range(max_t)
+            empty_df = pd.DataFrame(index=index)
             df = empty_df.join(df, how='left').fillna(0)
 
         return df
@@ -44,14 +49,20 @@ class ExternalData:
 
 class ExternalHosps(ExternalData):
     def fetch_from_db(self):
-        pd.read_sql('select * from cdphe.emresource_hospitalizations', self.engine)
-
-
-def vacc_eff_decay(days_since):
-    return 1.1 * (1 - np.exp(-days_since/7)) * np.exp(-days_since/365)
+        return pd.read_sql('select * from cdphe.emresource_hospitalizations', self.engine, parse_dates=['measure_date'])
 
 
 class ExternalVacc(ExternalData):
+    def fetch_from_db(self, county_ids=None):
+        if county_ids is None:
+            sql = open('sql/vaccination_by_age_group_with_boosters_wide.sql', 'r').read()
+            return pd.read_sql(sql, self.engine, index_col=['measure_date', 'age'])
+        else:
+            sql = open('sql/vaccination_by_age_group_with_boosters_wide_county_subset.sql', 'r').read()
+            return pd.read_sql(sql, self.engine, index_col=['measure_date', 'age'], params={'county_ids': county_ids})
+
+
+class ExternalVaccWithProjections(ExternalData):
     def fetch_from_db(self, proj_params=None, group_pop=None):
         sql = open('sql/vaccination_by_age_group_with_boosters_wide.sql', 'r').read()
 
@@ -67,7 +78,7 @@ class ExternalVacc(ExternalData):
 
         # add projections
         proj_from_date = df.index.get_level_values('measure_date').max() + dt.timedelta(days=1)
-        if self.fill_to_date.date() >= proj_from_date:
+        if self.fill_to_date >= proj_from_date:
             proj_date_range = pd.date_range(proj_from_date, self.fill_to_date)
             # project rates based on the last {proj_lookback} days of data
             projected_rates = df.loc[(proj_from_date - dt.timedelta(days=proj_lookback)):].groupby('age').sum() / float(proj_lookback)
@@ -84,7 +95,7 @@ class ExternalVacc(ExternalData):
                 groups = realloc_priority if realloc_priority else projections.index.unique('age')
                 # vaccs = df.index.unique('vacc')
                 for d in projections.index.unique('measure_date'):
-                    this_max_cumu = get_params(max_cumu.copy(), (d - self.fill_from_date.date()).days)
+                    this_max_cumu = get_params(max_cumu.copy(), (d - self.fill_from_date).days)
                     max_cumu_df = pd.DataFrame(this_max_cumu) * pd.DataFrame(group_pop, index=shots).transpose()
                     for i in range(len(groups)):
                         group = groups[i]
@@ -98,82 +109,9 @@ class ExternalVacc(ExternalData):
 
                     cumu_vacc += projections.loc[d]
 
-            df = pd.concat([df, projections]).sort_index()
-
-        # get vacc rates from database, and calc rate and cumulative shots, shifting to account for 7-day delay of effect
-        # df = pd.read_sql(sql, self.engine, index_col=['measure_date', 'age', 'vacc']).sort_index()
-        shots = list(df.columns)
-        rate = df.groupby(['age']).shift(7).fillna(0)
-        cumu = rate.groupby(['age']).cumsum()
-
-        # calculate the "terminal rate" for each shot, representing the number of people who received a given shot on a given day who will NOT receive another shot
-        terminal_cumu = pd.DataFrame(index=cumu.index)
-        for shot, next_shot in zip(shots, shots[1:] + [None]):
-            terminal_cumu[shot] = (cumu[shot] - cumu[next_shot].groupby(['age']).max()).clip(lower=0).reorder_levels(['measure_date', 'age']) if next_shot is not None else cumu[shot].copy()
-        terminal_rate = terminal_cumu.groupby(['age']).diff().fillna(0)
-
-        # calculate the mean efficacy from the terminal rates
-        terminal_cumu_eff = pd.DataFrame(index=terminal_rate.index, columns=shots, data=0)
-        for shot, initial_shot_eff in {'shot1': 0.76, 'shot2': 0.97, 'shot3': 0.99}.items():
-            for days_ago in range(len(terminal_rate)):
-                terminal_cumu_eff[shot] += initial_shot_eff * vacc_eff_decay(days_ago) * terminal_rate[shot].groupby(['age']).shift(days_ago).fillna(0)
-        total_mean_eff = terminal_cumu_eff.sum(axis=1) / terminal_cumu.sum(axis=1)
-
-        total_mean_eff.to_csv('output/vacc_total_mean_eff.csv')
+            df = pd.concat({False: df, True: projections}).rename_axis(index=['is_projected', 'measure_date', 'age']).reorder_levels(['measure_date', 'age', 'is_projected']).sort_index()
 
         return df
-        
-
-# class ExternalVacc(ExternalData):
-#     def fetch_from_db(self, proj_params=None, group_pop=None):
-#         sql = open('sql/vaccinations_by_age_group.sql', 'r').read()
-#
-#         proj_params = proj_params if type(proj_params) == dict else json.load(open(proj_params))
-#         proj_lookback = proj_params['lookback'] if 'lookback' in proj_params.keys() else 7
-#         proj_fixed_rates = proj_params['fixed_rates'] if 'fixed_rates' in proj_params.keys() else None
-#         max_cumu = proj_params['max_cumu'] if 'max_cumu' in proj_params.keys() else 0
-#         max_rate_per_remaining = proj_params['max_rate_per_remaining'] if 'max_rate_per_remaining' in proj_params.keys() else 1.0
-#         realloc_priority = proj_params['realloc_priority'] if 'realloc_priority' in proj_params.keys() else None
-#
-#         df = pd.read_sql(sql, self.engine, index_col=['measure_date', 'age', 'vacc'])
-#
-#         # add projections
-#         proj_from_date = df.index.get_level_values('measure_date').max() + dt.timedelta(days=1)
-#         if self.fill_to_date.date() >= proj_from_date:
-#             proj_date_range = pd.date_range(proj_from_date, self.fill_to_date)
-#             # project rates based on the last {proj_lookback} days of data
-#             projected_rates = df.loc[(proj_from_date - dt.timedelta(days=proj_lookback)):].groupby(['age', 'vacc']).sum() / float(proj_lookback)
-#             # override rates using fixed values from proj_fixed_rates, when present
-#             if proj_fixed_rates:
-#                 projected_rates['rate'] = pd.DataFrame(proj_fixed_rates).stack().combine_first(projected_rates['rate'])
-#             # add projections to dataframe
-#             projections = pd.concat({d: projected_rates for d in proj_date_range})
-#             projections['is_projected'] = True
-#             df = pd.concat([df, projections]).sort_index()
-#
-#             # reduce rates to prevent cumulative vaccination from exceeding max_cumu
-#             if max_cumu:
-#                 cumu_vacc = df.loc[:(proj_from_date - dt.timedelta(days=1)), 'rate'].groupby('age').sum()
-#                 groups = realloc_priority if realloc_priority else df.index.unique('age')
-#                 vaccs = df.index.unique('vacc')
-#                 for d in proj_date_range:
-#                     for i in range(len(groups)):
-#                         group = groups[i]
-#                         current_rate = df.loc[(d, group), 'rate'].sum()
-#                         if current_rate > 0:
-#                             this_max_cumu = max_cumu.copy()
-#                             max_rate = max_rate_per_remaining * (
-#                                     this_max_cumu[group] * group_pop[group] - cumu_vacc[group])
-#                             percent_excess = max((current_rate - max_rate) / current_rate, 0)
-#                             for vacc in vaccs:
-#                                 excess_rate = df.loc[(d, group, vacc), 'rate'] * percent_excess
-#                                 df.loc[(d, group, vacc), 'rate'] -= excess_rate
-#                                 # if a reallocate_order is provided, reallocate excess rate to other groups
-#                                 if i < len(groups) - 1 and realloc_priority is not None:
-#                                     df.loc[(d, groups[i + 1], vacc), 'rate'] += excess_rate
-#                         cumu_vacc[group] += df.loc[(d, group), 'rate'].sum()
-#
-#         return df
 
 
 class ExternalContactMatrices(ExternalData):
@@ -181,15 +119,15 @@ class ExternalContactMatrices(ExternalData):
 
 
 # load actual hospitalization data for fitting
-def get_hosps(engine, min_date=dt.datetime(2020, 1, 24)):
-    actual_hosp_df = pd.read_sql(open('sql/emresource_hospitalizations.sql').read(), engine)
-    actual_hosp_df['t'] = ((pd.to_datetime(actual_hosp_df['measure_date']) - min_date) / np.timedelta64(1, 'D')).astype(int)
-    actual_hosp_tmin = actual_hosp_df[actual_hosp_df['currently_hospitalized'].notnull()]['t'].min()
-    return [0] * actual_hosp_tmin + list(actual_hosp_df['currently_hospitalized'])
+# def get_hosps(engine, min_date=dt.datetime(2020, 1, 24)):
+#     actual_hosp_df = pd.read_sql(open('sql/emresource_hospitalizations.sql').read(), engine)
+#     actual_hosp_df['t'] = ((pd.to_datetime(actual_hosp_df['measure_date']) - min_date) / np.timedelta64(1, 'D')).astype(int)
+#     actual_hosp_tmin = actual_hosp_df[actual_hosp_df['currently_hospitalized'].notnull()]['t'].min()
+#     return [0] * actual_hosp_tmin + list(actual_hosp_df['currently_hospitalized'])
 
 
 def get_hosps_df(engine):
-    return pd.read_sql(open('sql/emresource_hospitalizations.sql').read(), engine).set_index('measure_date')['currently_hospitalized']
+    return pd.read_sql(open('sql/emresource_hospitalizations.sql').read(), engine, parse_dates=['measure_date']).set_index('measure_date')['currently_hospitalized']
 
 
 def get_hosps_by_age(engine, fname):
