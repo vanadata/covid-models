@@ -52,16 +52,11 @@ class CovidModelFit:
 
     # run an optimization to minimize the cost function using scipy.optimize.minimize()
     # method = 'curve_fit' or 'minimize'
-    # def run(self, engine, base_model=None, method='curve_fit', start_date=dt.date(2020, 1, 24), end_date=None, **model_params):
     def run(self, engine, method='curve_fit', window_size=14, look_back=3, last_window_min_size=21, batch_size=None, increment_size=1):
 
         # get the end date from actual hosps
         end_t = self.actual_hosp.index.max() + 1
         end_date = self.base_specs.start_date + dt.timedelta(end_t)
-
-        # if there's no batch size, set the batch size to be the total number of windows to be fit
-        if batch_size is None:
-            batch_size = look_back
 
         # prep model (we only do this once to save time)
         t0 = perf_counter()
@@ -76,6 +71,10 @@ class CovidModelFit:
         fitted_tc_cov = None
         if look_back is None:
             look_back = len(tslices) + 1
+
+        # if there's no batch size, set the batch size to be the total number of windows to be fit
+        if batch_size is None:
+            batch_size = look_back
 
         trim_off_end_list = list(range(look_back - batch_size, 0, -increment_size)) + [0]
         for i, trim_off_end in enumerate(trim_off_end_list):

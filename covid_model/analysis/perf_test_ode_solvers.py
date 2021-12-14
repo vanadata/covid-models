@@ -16,7 +16,7 @@ if __name__ == '__main__':
     engine = db_engine()
 
     model = CovidModel()
-    cms = CovidModelSpecifications.from_db(engine, 121, new_end_date=model.end_date)
+    cms = CovidModelSpecifications.from_db(engine, 325, new_end_date=model.end_date)
     cms.set_model_params('input/params.json')
 
     model.prep(specs=cms)

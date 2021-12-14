@@ -6,10 +6,10 @@
     "40-64": 1818147,
     "65+": 878522
   },
-  "betta": 0.4793,
+  "betta": 0.8308,
   "lamb": 1.395,
-  "gamm": 0.111111,
-  "alpha": 4,
+  "gamm": 0.2  ,
+  "alpha": 2.5,
   "pS": {
     "0-19": 0.110023,
     "20-39": 0.35705,
@@ -64,5 +64,7 @@
   "om_seed": 0,
   "omicron_transm_mult": 1,
   "omicron_acq_immune_escape": 0.0,
-  "omicron_vacc_immune_escape": 0.0
+  "omicron_vacc_immune_escape": 0.0,
+  "delta_vacc_eff_k": 1.6,
+  "omicron_vacc_eff_k": 1.6
 }

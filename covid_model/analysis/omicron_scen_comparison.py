@@ -9,7 +9,7 @@ from time import perf_counter
 from timeit import timeit
 
 from covid_model.db import db_engine
-from covid_model.model_with_variants import CovidModelWithVariants
+from covid_model.model_with_omicron import CovidModelWithVariants
 from covid_model.model_specs import CovidModelSpecifications
 
 
@@ -31,8 +31,8 @@ if __name__ == '__main__':
     engine = db_engine()
 
     model = CovidModelWithVariants(end_date=dt.date(2022, 12, 31))
-    cms = CovidModelSpecifications.from_db(engine, 320, new_end_date=model.end_date)
-    cms.set_model_params('input/params_with_shorter_gi.json')
+    cms = CovidModelSpecifications.from_db(engine, 386, new_end_date=model.end_date)
+    cms.set_model_params('input/params.json')
 
     model.prep(specs=cms)
 
@@ -47,6 +47,8 @@ if __name__ == '__main__':
         # plt.plot(model.daterange, omicron_prevalence_share(model), label='No Omicron')
 
     scenarios = {
+        # 'Low Vacc Escape': {'omicron_transm_mult': 2, 'omicron_acq_immune_escape': 0.5, 'omicron_vacc_eff_k': 1.6},
+        # 'High Vacc Escape': {'omicron_transm_mult': 2, 'omicron_acq_immune_escape': 0.5, 'omicron_vacc_eff_k': 2.6},
         'Low Infectiousness, High Immune-Escape (vs. Acq. Immunity Only)': {'omicron_transm_mult': 1, 'omicron_acq_immune_escape': 0.89, 'omicron_vacc_immune_escape': 0},
         'Low Infectiousness, High Immune-Escape (Including vs. Vacc.)': {'omicron_transm_mult': 1, 'omicron_acq_immune_escape': 0.89, 'omicron_vacc_immune_escape': 0.89},
         'Med. Infectiousness, Med. Immune-Escape (vs. Acq. Immunity Only)': {'omicron_transm_mult': 1.5, 'omicron_acq_immune_escape': 0.55, 'omicron_vacc_immune_escape': 0},
@@ -57,8 +59,8 @@ if __name__ == '__main__':
 
     virulence = {
         'Same Virulence': 1.0,
-        '25% Reduced Virulence': 0.75,
-        '50% Reduced Virulence': 0.5
+        # '25% Reduced Virulence': 0.75,
+        # '50% Reduced Virulence': 0.5
     }
 
     for om_imports_start in [1]:
@@ -72,8 +74,11 @@ if __name__ == '__main__':
         for ax, (scen_label, scen_params) in zip(axs.flatten(), scenarios.items()):
             ax.title.set_text(scen_label)
             for param, val in scen_params.items():
-                model.set_param(param, val)
-
+                if param == 'omicron_vacc_eff_k':
+                    model.specifications.model_params[param] = val
+                    print(timeit('model.apply_omicron_vacc_eff()', number=1, globals=globals()), f'seconds to reapply specifications with {param} = {val}.')
+                else:
+                    model.set_param(param, val)
             for virulence_label, hosp_mult in virulence.items():
                 model.set_param('hosp', mult=hosp_mult, attrs={'variant': 'omicron'})
                 model.set_param('dnh', mult=hosp_mult, attrs={'variant': 'omicron'})

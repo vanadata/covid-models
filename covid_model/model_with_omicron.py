@@ -1,6 +1,7 @@
 from collections import OrderedDict
 
 from covid_model.model import CovidModel
+from covid_model.model_specs import CovidModelSpecifications
 
 
 class CovidModelWithVariants(CovidModel):
@@ -11,6 +12,18 @@ class CovidModelWithVariants(CovidModel):
                         'variant': ['none', 'omicron']})
 
     param_attr_names = ('age', 'vacc', 'variant')
+
+    # add set a different vacc efficacy for Omicron
+    def apply_omicron_vacc_eff(self):
+        self.set_param('omicron_vacc_eff', 0)
+        vacc_mean_efficacy_vs_omicron_dict = self.specifications.get_vacc_mean_efficacy(k='omicron_vacc_eff_k').to_dict()
+        for age in self.attr['age']:
+            for t in self.trange:
+                self.set_param('omicron_vacc_eff', vacc_mean_efficacy_vs_omicron_dict[(t, age)], {'age': age, 'vacc': 'vacc'}, trange=[t])
+
+    def apply_specifications(self, specs: CovidModelSpecifications = None):
+        super().apply_specifications(specs)
+        self.apply_omicron_vacc_eff()
 
     # build ODE
     def build_ode(self):
@@ -45,9 +58,9 @@ class CovidModelWithVariants(CovidModel):
         # seed omicron
         self.add_flow(('S', '40-64', 'unvacc', 'none'), ('E', '40-64', 'unvacc', 'omicron'), constant='om_seed')
         # build ode
-        vacc_eff_w_delta = 'vacc_eff * (1 - (1 - nondelta_prevalence) * delta_max_efficacy_reduction * (1 - vacc_eff))'
+        vacc_eff_w_delta = '(vacc_eff * nondelta_prevalence + vacc_eff_vs_delta * (1 - nondelta_prevalence))'
         base_transm = f'betta * (1 - ef) * (1 - {vacc_eff_w_delta}) / total_pop'
-        base_transm_omicron = f'betta * (1 - ef) * (1 - {vacc_eff_w_delta} * (1 - omicron_vacc_immune_escape)) / total_pop'
+        base_transm_omicron = f'betta * (1 - ef) * (1 - omicron_vacc_eff) / total_pop'
         for variant in self.attributes['variant']:
             infectious_cmpts = [(s, a, v, variant) for a in self.attributes['age'] for v in self.attributes['vacc'] for
                                 s in ['I', 'A']]

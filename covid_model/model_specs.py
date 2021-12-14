@@ -157,7 +157,7 @@ class CovidModelSpecifications:
 
         self.timeseries_effects[effect_type_name] = []
         for effect_name in prevalence_df.columns:
-            d = {'effect_name': effect_name, 'multipliers': multiplier_dict[effect_name], 'start_date': prevalence_df.index.min().strftime('%y-%m-%d'), 'prevalence': list(prevalence_df[effect_name].values)}
+            d = {'effect_name': effect_name, 'multipliers': multiplier_dict[effect_name], 'start_date': prevalence_df.index.min().strftime('%Y-%m-%d'), 'prevalence': list(prevalence_df[effect_name].values)}
             self.timeseries_effects[effect_type_name].append(d)
 
     def get_timeseries_effect_multipliers(self):
@@ -173,7 +173,9 @@ class CovidModelSpecifications:
             prevalence_df = pd.DataFrame(index=pd.date_range(self.start_date, self.end_date))
 
             for effect_specs in self.timeseries_effects[effect_type]:
-                start_date = dt.datetime.strptime(effect_specs['start_date'], '%y-%m-%d').date()
+                if len(effect_specs['start_date']) == 8:
+                    effect_specs['start_date'] = '20' + effect_specs['start_date']
+                start_date = dt.datetime.strptime(effect_specs['start_date'], '%Y-%m-%d').date()
                 end_date = self.end_date
                 # end_date = start_date + dt.timedelta(days=len(effect_specs['prevalence']) - 1)
 
@@ -270,7 +272,10 @@ class CovidModelSpecifications:
         fail_cumu = (fail_increase - fail_reduction).groupby('age').cumsum()
         return (fail_reduction / fail_cumu).fillna(0)
 
-    def get_vacc_mean_efficacy(self, delay=7):
+    def get_vacc_mean_efficacy(self, delay=7, k=1):
+        if isinstance(k, str):
+            k = self.model_params[k]
+
         vacc_df = self.get_vacc_rates()
         shots = list(vacc_df.columns)
         rate = vacc_df.groupby(['age']).shift(delay).fillna(0)
@@ -278,7 +283,7 @@ class CovidModelSpecifications:
         vacc_effs = {k: v['eff'] for k, v in self.vacc_immun_params.items()}
 
         terminal_cumu_eff = pd.DataFrame(index=rate.index, columns=shots, data=0)
-        vacc_eff_decay_mult = lambda days_ago: 1.0718 * (1 - np.exp(-(days_ago + delay) / 7)) * np.exp(-days_ago / 540)
+        vacc_eff_decay_mult = lambda days_ago: (1.0718 * (1 - np.exp(-(days_ago + delay) / 7)) * np.exp(-days_ago / 540)) ** k
         for shot, next_shot in zip(shots, shots[1:] + [None]):
             nonzero_ts = rate[shot][rate[shot] > 0].index.get_level_values('t')
             if len(nonzero_ts) > 0:

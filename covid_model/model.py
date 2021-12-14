@@ -81,7 +81,7 @@ class CovidModel(ODEBuilder):
 
         # if new specs are provided, update specifications
         if specs is not None:
-            if isinstance(specs, CovidModelSpecifications):
+            if not isinstance(specs, int):
                 self.specifications = specs
             else:
                 self.specifications = CovidModelSpecifications.from_db(engine, specs, new_end_date=self.end_date)
@@ -122,17 +122,17 @@ class CovidModel(ODEBuilder):
         # get vacc rates and efficacy from specifications
         vacc_per_unvacc = self.specifications.get_vacc_rate_per_unvacc()
         vacc_mean_efficacy = self.specifications.get_vacc_mean_efficacy()
+        vacc_mean_efficacy_vs_delta = self.specifications.get_vacc_mean_efficacy(k='delta_vacc_eff_k')
         vacc_fail_per_vacc = self.specifications.get_vacc_fail_per_vacc()
         vacc_fail_reduction_per_fail = self.specifications.get_vacc_fail_reduction_per_vacc_fail()
 
         # convert to dictionaries for performance lookup
         vacc_per_unvacc_dict = vacc_per_unvacc.to_dict()
         vacc_mean_efficacy_dict = vacc_mean_efficacy.to_dict()
+        vacc_mean_efficacy_vs_delta_dict = vacc_mean_efficacy_vs_delta.to_dict()
         vacc_fail_reduction_per_fail_dict = vacc_fail_reduction_per_fail.to_dict()
 
         # set the fail rate and vacc per unvacc rate for each dose
-        self.set_param('vacc_eff', 0, {'vacc': 'unvacc'})
-        self.set_param('vacc_eff', 0, {'vacc': 'vacc_fail'})
         for shot in vacc_per_unvacc.columns:
             for age in self.attr['age']:
                 self.set_param(f'{shot}_fail_rate', vacc_fail_per_vacc[shot][age], {'age': age})
@@ -144,10 +144,15 @@ class CovidModel(ODEBuilder):
         self.set_param('hosp', 0, attrs={'vacc': 'vacc'})
         self.set_param('dnh', 0, attrs={'vacc': 'vacc'})
 
-        # set vacc efficacy and fail reduciton over time
+        # set vacc efficacy and fail reduction over time
+        self.set_param('vacc_eff', 0, {'vacc': 'unvacc'})
+        self.set_param('vacc_eff', 0, {'vacc': 'vacc_fail'})
+        self.set_param('vacc_eff_vs_delta', 0, {'vacc': 'unvacc'})
+        self.set_param('vacc_eff_vs_delta', 0, {'vacc': 'vacc_fail'})
         for age in self.attr['age']:
             for t in self.trange:
                 self.set_param('vacc_eff', vacc_mean_efficacy_dict[(t, age)], {'age': age, 'vacc': 'vacc'}, trange=[t])
+                self.set_param('vacc_eff_vs_delta', vacc_mean_efficacy_vs_delta_dict[(t, age)], {'age': age, 'vacc': 'vacc'}, trange=[t])
                 self.set_param('vacc_fail_reduction_per_vacc_fail', vacc_fail_reduction_per_fail_dict[(t, age)], {'age': age, 'vacc': 'vacc_fail'}, trange=[t])
 
         # alter parameters based on timeseries effects
@@ -216,30 +221,11 @@ class CovidModel(ODEBuilder):
         if len(self.terms) > 0 and not suppress_ode_rebuild:
             self.rebuild_ode_with_new_tc()
 
-    # # extend the time range with an additional slice; should maybe change how this works to return a new CovidModel instead
-    # def add_tslice(self, t, ef=None):
-    #     if t <= self.tslices[-2]:
-    #         raise ValueError(f'New tslice (t={t}) must be greater than the second to last tslices (t={self.tslices[-2]}).')
-    #     if t < self.tmax:
-    #         tmax = self.tmax
-    #         self.tslices[-1] = t
-    #         self.tslices.append(tmax)
-    #     else:
-    #         self.tslices.append(t)
-    #         self.trange = range(self.tslices[0], self.tslices[-1])
-    #         for this_t in range(self.tslices[-2], t):
-    #             self.params[this_t] = self.params[self.tslices[-2] - 1]
-    #     if ef:
-    #         self.efs.append(ef)
-    #         self.set_tc(self.efs)
-    #     self.fit_id = None
-
     # build ODE
     def build_ode(self):
         self.reset_ode()
-        vacc_eff_w_delta = 'vacc_eff * (1 - (1 - nondelta_prevalence) * delta_max_efficacy_reduction * (1 - vacc_eff))'
+        vacc_eff_w_delta = '(vacc_eff * nondelta_prevalence + vacc_eff_vs_delta * (1 - nondelta_prevalence))'
         base_transm = f'betta * (1 - ef) * (1 - {vacc_eff_w_delta}) / total_pop'
-        # infectious_cmpts = [('A', a, v) for a in self.attributes['age'] for v in self.attributes['vacc']]
         infectious_cmpts = [(s, a, v) for a in self.attributes['age'] for v in self.attributes['vacc'] for s in ['I', 'A']]
         infectious_cmpt_coefs = [' * '.join(['lamb' if seir == 'I' else '1', 'unvacc_relative_transm' if vacc == 'unvacc' else '1']) for seir, age, vacc in infectious_cmpts]
         for age in self.attributes['age']:
@@ -330,6 +316,7 @@ class CovidModel(ODEBuilder):
         else:
             table = 'simulation_results'
             df['sim_id'] = sim_id
+            del df['params']
 
         # write to database
         results = df.to_sql(table

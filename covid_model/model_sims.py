@@ -1,3 +1,5 @@
+from time import perf_counter
+
 import numpy as np
 import pandas as pd
 import datetime as dt
@@ -56,13 +58,16 @@ class CovidModelSimulation:
     def __init__(self, specs, engine, end_date=None):
         self.model = CovidModel(end_date=end_date)
         self.model.prep(specs=specs, engine=engine)
+        self.base_tc = self.model.specifications.tc.copy()
 
         self.window_size = self.model.specifications.tslices[-1] - self.model.specifications.tslices[-2]
+        self.simulation_horizon = int(np.ceil((self.model.tmax - self.model.specifications.tslices[-1]) / self.window_size)) - 1
+
         tslices = self.model.specifications.tslices + list(range(self.model.specifications.tslices[-1] + self.window_size, self.model.tmax, self.window_size))
-        tc = self.model.specifications.tc + [self.model.specifications.tc[-1]] * (len(tslices) - len(self.model.specifications.tc) + 1)
+        tc = self.base_tc + [self.base_tc[-1]] * (len(tslices) - len(self.base_tc) + 1)
         self.model.apply_tc(tslices=tslices, tc=tc)
 
-        self.engine=engine
+        self.engine = engine
         self.db_metadata = MetaData(schema='covid_model')
         self.db_metadata.reflect(engine, only=['simulations', 'simulation_results', 'results'])
         self.table = self.db_metadata.tables[f'covid_model.simulations']
@@ -70,8 +75,7 @@ class CovidModelSimulation:
         self.sim_id = None
         self.write_to_db(engine)
 
-        self.base_result_id = None
-        self.base_results = self.model.solution_ydf.stack(level=self.model.param_attr_names)
+        self.base_results = None
         self.results = []
         self.results_hosps = []
 
@@ -92,15 +96,17 @@ class CovidModelSimulation:
 
     def run_base_result(self):
         self.model.solve_seir()
+        self.base_results = self.model.solution_ydf.stack(level=self.model.param_attr_names)
         self.model.write_to_db(self.engine)
 
     def sample_fitted_tcs(self, sample_n=1):
         fitted_count = len(self.model.specifications.tc_cov)
-        fitted_efs_dist = sps.multivariate_normal(mean=self.model.specifications.tc[-fitted_count:], cov=self.model.specifications.tc_cov)
+        fitted_efs_dist = sps.multivariate_normal(mean=self.base_tc[-fitted_count:], cov=[[float(x) for x in a] for a in self.model.specifications.tc_cov])
         fitted_efs_samples = fitted_efs_dist.rvs(sample_n)
-        return [list(self.model.specifications.tc[:-fitted_count]) + list(sample) for sample in (fitted_efs_samples if sample_n > 1 else [fitted_efs_samples])]
 
-    def sample_simulated_tcs(self, sample_n=1, horizon=1, sims_per_fitted_sample=5, arima_order='auto', skip_early_tcs=8):
+        return [list(self.base_tc[:-fitted_count]) + list(sample if hasattr(sample, '__iter__') else [sample]) for sample in (fitted_efs_samples if sample_n > 1 else [fitted_efs_samples])]
+
+    def sample_simulated_tcs(self, sample_n=1, sims_per_fitted_sample=5, arima_order='auto', skip_early_tcs=8):
         if len(np.unique(np.diff(self.model.specifications.tslices[skip_early_tcs-1:]))) > 1:
             raise ValueError('Window-sizes for TCs used for prediction must be evenly spaced.')
 
@@ -108,24 +114,26 @@ class CovidModelSimulation:
         fitted_sample_n = int(np.ceil(sample_n / sims_per_fitted_sample))
         fitted_tcs_sample = self.sample_fitted_tcs(fitted_sample_n)
 
-        horizon = int(np.ceil((self.model.tmax - self.model.specifications.tslices[-1]) / self.window_size)) - 1
-
-        for fitted_tcs in fitted_tcs_sample:
-            next_tcs_sample = forecast_timeseries(fitted_tcs[skip_early_tcs:], horizon=horizon, arima_order=arima_order)
+        for i, fitted_tcs in enumerate(fitted_tcs_sample):
+            print(f'Generated {len(simulated_tcs)}/{sample_n} future TC values.')
+            next_tcs_sample = forecast_timeseries(fitted_tcs[skip_early_tcs:], sims=sims_per_fitted_sample, horizon=self.simulation_horizon, arima_order=arima_order)
             simulated_tcs += [list(fitted_tcs) + list(next_tcs) for next_tcs in next_tcs_sample]
 
         return simulated_tcs[:sample_n]
 
     def run_simulations(self, n, **tc_sampling_args):
+        print(f'Simulating future TC values...')
         simulated_tcs = self.sample_simulated_tcs(n, **tc_sampling_args)
         for i, tcs in enumerate(simulated_tcs):
-            print(f'Running simulation {i+1}/{len(simulated_tcs)}')
+            t0 = perf_counter()
             self.model.apply_tc(tcs)
             self.model.solve_seir()
             self.results.append(self.model.solution_ydf.stack(level=self.model.param_attr_names))
             self.results_hosps.append(self.model.solution_sum('seir')['Ih'])
-            if engine:
-                self.model.write_to_db(engine, sim_id=self.sim_id)
+            t1 = perf_counter()
+            self.model.write_to_db(self.engine, sim_id=self.sim_id)
+            t2 = perf_counter()
+            print(f'Simulation {i+1}/{len(simulated_tcs)} completed in {round(t2-t0, 4)} sec, including {round(t2-t1, 4)} sec to write to database.')
 
         results_hosps_df = pd.DataFrame({i: hosps for i, hosps in enumerate(self.results_hosps)})
         hosp_percentiles = {int(100*qt): list(results_hosps_df.quantile(0.05, axis=1).values) for qt in [0.05, 0.10, 0.25, 0.5, 0.75, 0.90, 0.95]}
@@ -135,11 +143,8 @@ class CovidModelSimulation:
             hospitalized_percentiles=hosp_percentiles
         )
 
-        conn = engine.connect()
+        conn = self.engine.connect()
         result = conn.execute(stmt)
-
-    def run(self, n):
-        pass
 
 
 if __name__ == '__main__':
