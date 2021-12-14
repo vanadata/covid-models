@@ -6,9 +6,9 @@ import json
 import scipy.stats as sps
 from sqlalchemy import MetaData
 
-from covid_model.db import db_engine
-from covid_model.data_imports import ExternalVaccWithProjections, ExternalVacc
-from covid_model.utils import get_params
+from db import db_engine
+from data_imports import ExternalVaccWithProjections, ExternalVacc
+from utils import get_params
 
 
 class CovidModelSpecifications:

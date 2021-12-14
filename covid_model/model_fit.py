@@ -5,9 +5,9 @@ from time import perf_counter
 
 import scipy.optimize as spo
 
-from covid_model.data_imports import ExternalHosps
-from covid_model.model import CovidModel
-from covid_model.model_specs import CovidModelSpecifications
+from data_imports import ExternalHosps
+from model import CovidModel
+from model_specs import CovidModelSpecifications
 
 
 class CovidModelFit:

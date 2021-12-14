@@ -3,7 +3,7 @@ import datetime as dt
 
 import argparse
 
-from db_utils.conn import db_engine
+from db import db_engine
 from model_specs import CovidModelSpecifications
 from model_sims import CovidModelSimulation
 

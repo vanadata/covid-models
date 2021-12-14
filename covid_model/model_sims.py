@@ -10,7 +10,7 @@ import arch
 
 from sqlalchemy import MetaData
 
-from db_utils.conn import db_engine
+from db import db_engine
 from model import CovidModel
 from model_specs import CovidModelSpecifications
 import random

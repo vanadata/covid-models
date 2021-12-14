@@ -7,11 +7,11 @@ import pyswarms as ps
 from sqlalchemy import MetaData
 from datetime import datetime
 import itertools
-from covid_model.data_imports import ExternalHosps, ExternalVaccWithProjections
-from covid_model.model_specs import CovidModelSpecifications
-from covid_model.utils import *
+from data_imports import ExternalHosps, ExternalVaccWithProjections
+from model_specs import CovidModelSpecifications
+from utils import *
 from collections import OrderedDict
-from covid_model.ode_builder import *
+from ode_builder import *
 
 
 # class used to run the model given a set of parameters, including transmission control (ef)
