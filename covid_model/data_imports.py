@@ -5,8 +5,8 @@ import json
 import scipy.integrate as spi
 import scipy.optimize as spo
 import matplotlib.pyplot as plt
-from covid_model.db import db_engine
-from covid_model.utils import get_params
+from db import db_engine
+from utils import get_params
 
 
 def normalize_date(date):
