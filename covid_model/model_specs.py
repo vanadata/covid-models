@@ -102,7 +102,7 @@ class CovidModelSpecifications:
             model_params=self.model_params,
             vacc_actual={dose: rates.unstack(level='age').to_dict(orient='list') for dose, rates in self.actual_vacc_df.to_dict(orient='series').items()},
             vacc_proj_params=self.vacc_proj_params,
-            vacc_proj={dose: rates.unstack(level='age').to_dict(orient='list') for dose, rates in self.proj_vacc_df.to_dict(orient='series').items()},
+            vacc_proj={dose: rates.unstack(level='age').to_dict(orient='list') for dose, rates in self.proj_vacc_df.to_dict(orient='series').items()} if self.proj_vacc_df is not None else None,
             vacc_immun_params=self.vacc_immun_params,
             timeseries_effects=self.timeseries_effects,
         )
@@ -211,10 +211,9 @@ class CovidModelSpecifications:
         shots = list(self.actual_vacc_df.columns)
 
         # add projections
-        # proj_from_date = self.actual_vacc_df.index.get_level_values('measure_date').max() + dt.timedelta(days=1)
         proj_from_t = self.actual_vacc_df.index.get_level_values('t').max() + 1
         proj_to_t = (self.end_date - self.start_date).days
-        if proj_to_t >= proj_from_t:
+        if proj_to_t > proj_from_t:
             proj_trange = range(proj_from_t, proj_to_t)
             # project rates based on the last {proj_lookback} days of data
             projected_rates = self.actual_vacc_df.loc[(proj_from_t - proj_lookback):].groupby('age').sum() / float(proj_lookback)
